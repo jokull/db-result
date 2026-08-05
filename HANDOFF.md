@@ -48,14 +48,22 @@ taxonomy and a retry hint, not a tag, for transient failures.*
 ```ts
 tryDb(
   query: PromiseLike<T> | (() => PromiseLike<T> | T),
-  config?: RetryConfig<DbError>,   // better-result 3.0 shape: times/delayMs/backoff/
-                                   // shouldRetry/jitter/signal — passthrough
+  config?: TryDbConfig<DbError>,   // { retryTransient?, retry?, signal? }
 ): Promise<Result<T, DbError>>
 ```
 
-- Built on better-result 3.0 `Result.tryPromise` (verified API) — retry config and
-  `signal`/abort come from the host library, `shouldRetry` reads the `potentiallyTransient`
-  hint. Sync drivers (bun:sqlite) go through a `Promise.resolve` wrapper.
+- Built on better-result 3.0 `Result.tryPromise` (verified API) — signal/abort
+  comes from the host library. `RetryConfig`/`TryPromiseContext` are mirrored
+  locally (upstream doesn't export them as types).
+- **`retryTransient` defaults to `true`**: transient failures auto-retry with
+  sensible per-error defaults (deadlock/busy → short backoff; connect-phase →
+  reconnect backoff). Deterministic errors (constraints, auth, authz, syntax)
+  and **ambiguous outcomes** (connection lost mid-query: 08006/08007,
+  ECONNRESET/EPIPE, "Connection terminated unexpectedly" — the write may have
+  committed) are never auto-retried. Explicit `retry` overrides everything;
+  the safe gate is injected unless `shouldRetry` is given; `retryTransient:
+  false` disables auto-retry. The `potentiallyTransient` hint stays public for
+  deliberate custom policies.
 - **Name: `tryDb`** — not `safeDb`/`safeQuery` (injection-safety vocabulary collision),
   not `attempt*` (retry vocabulary), not `safeTry` (does not exist). `tryDb` has zero
   precedent collisions and sits in the `Result.try` family.

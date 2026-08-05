@@ -52,24 +52,28 @@ No `instanceof`, no `error.code === "23505"`, no try/catch. The union is the con
 not the work: unhandled tags default to 500, logged with their `cause`, and the types
 tell you exactly what you're choosing to ignore.
 
-**Retry by policy, not by tag:**
+**Retry by default — deterministic errors never retried:**
 
 ```ts
-const created = await tryDb(
-  () => db.insert(users).values({ email }).returning(),
-  {
-    retry: {
-      times: 3,
-      delayMs: 100,
-      backoff: "exponential",
-      shouldRetry: (e) => e.potentiallyTransient, // connection, deadlock, busy, timeouts
-    },
-  },
-);
+const created = await tryDb(() => db.insert(users).values({ email }).returning());
+// transient failures are auto-retried with sensible per-error defaults:
+//   deadlock / serialization / lock-timeout / busy  → short backoff
+//   connect-refused / too-many-connections         → reconnect backoff
+// Deterministic errors (constraints, auth, authz, syntax) are never retried,
+// and neither are ambiguous outcomes (connection lost mid-query — the write
+// may have committed).
 ```
 
-The transient realm — connection loss, deadlocks, lock/busy contention, timeouts — is
-handled by one policy line, never enumerated at every call site.
+Opt out, or own the policy:
+
+```ts
+await tryDb(q, { retryTransient: false });          // never auto-retry
+await tryDb(q, {                                    // you own times/delay/shouldRetry
+  retry: { times: 5, delayMs: 50, backoff: "exponential", shouldRetry: (e) => e.potentiallyTransient },
+});
+```
+
+An explicit `retry` always wins; if you don't provide `shouldRetry`, the safe gate is injected so deterministic errors still never retry.
 
 ---
 
@@ -96,8 +100,11 @@ All nine classes are exported, plus guards: `isUniqueViolation(e)`, `isConnectio
 
 Every classified error carries `potentiallyTransient?: boolean` — `true` for the
 retryable set (connection loss, deadlock, serialization, lock/busy contention,
-timeouts), never for constraints or auth. Retry is a policy decision, not a tag: the
-same class can be transient or not depending on context, and a boolean hint stays honest.
+timeouts), never for constraints or auth. Retry is a policy decision, not a tag:
+`tryDb` retries the transient set by default (`retryTransient`, default `true`)
+with per-error defaults — but skips *ambiguous* outcomes (connection lost
+mid-query, where the write may have committed): those stay `potentiallyTransient`
+as a hint for your own deliberate policy, never as an automatic retry.
 
 ---
 

@@ -68,6 +68,26 @@ type RetryConfig<E> = {
 
 const transient = { potentiallyTransient: true } as const;
 
+/**
+ * Attaches an internal, non-enumerable "safe to auto-retry" flag. The public
+ * `potentiallyTransient` hint says *retrying may help*; `retrySafe` says the
+ * default policy may retry (deterministic and ambiguous-outcome errors never
+ * get it).
+ */
+const mark = (error: DbError, retrySafe: boolean): DbError => {
+  try {
+    Object.defineProperty(error, "retrySafe", {
+      value: retrySafe,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  } catch {
+    // diagnostic only; never fail classification over it.
+  }
+  return error;
+};
+
 class UniqueViolation extends TaggedError("db/unique-violation")<{
   constraint: string;
   potentiallyTransient?: boolean;
@@ -147,9 +167,12 @@ const SLOTS = ["cause", "failure", "error", "defect"] as const;
 /** Only 5-char alphanumeric codes count as SQLSTATE. */
 const SQLSTATE_RE = /^[0-9A-Z]{5}$/;
 
-/** Node system-error codes that mean the connection layer failed. */
-const CONNECTION_CODES_RE =
-  /^(ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EHOSTDOWN|EPIPE|ECONNABORTED|EPROTO)$/;
+/** Connect-phase failures — the channel was never established; safe to retry. */
+const SAFE_CONNECT_CODES = new Set([
+  "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "ECONNABORTED",
+]);
+/** Mid-query channel loss — the outcome is unknown; hint, not auto-retry. */
+const AMBIGUOUS_CONNECT_CODES = new Set(["ECONNRESET", "EPIPE"]);
 /** TLS/crypto failure codes — connection realm, but not transient (config). */
 const TLS_CODES_RE =
   /^(DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|ERR_TLS_PROTOCOL_VERSION|ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED)$/;
@@ -193,13 +216,23 @@ const classifySQLSTATE = (code: string, constraint: string): DbError => {
     case "28P01": case "28000": return new AuthenticationFailed({});
     case "42501": return new AuthorizationFailed({}); // before the 42* catch-all
   }
-  if (code.startsWith("08")) return new ConnectionFailure(transient);
+  if (code.startsWith("08")) {
+    // Connect-phase SQLSTATEs are safe to auto-retry; mid-query loss and state
+    // bugs are ambiguous (the write may have committed) — hint, not retry.
+    const safe = code === "08001" || code === "08004";
+    const isTransient = code !== "08003";
+    return mark(new ConnectionFailure(isTransient ? transient : {}), safe);
+  }
   if (code.startsWith("23")) return new QueryFailure({});
   if (code.startsWith("42")) return new SqlSyntaxError({});
-  // Transient set — the ones Effect's pg classifier misses (53300).
+  // Transient set — the ones Effect's pg classifier misses (53300). Safe to
+  // auto-retry: a failed statement / aborted transaction leaves nothing committed.
   if (code === "40001" || code === "40P01" || code === "55P03" || code === "57014" || code === "53300") {
-    return new QueryFailure(transient);
+    return mark(new QueryFailure(transient), true);
   }
+  // Server shutting down — connection realm; only "starting up" is retry-safe.
+  if (code === "57P01" || code === "57P02") return mark(new ConnectionFailure(transient), false);
+  if (code === "57P03") return mark(new ConnectionFailure(transient), true);
   return new QueryFailure({});
 };
 
@@ -212,7 +245,7 @@ const classifySqliteCodeString = (code: string, constraint: string): DbError | u
   if (code.startsWith("SQLITE_CONSTRAINT_CHECK")) return new CheckViolation({ constraint });
   if (code.startsWith("SQLITE_CONSTRAINT")) return new QueryFailure({});
   // BUSY/LOCKED are transient contention, not a tag — retry by policy.
-  if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) return new QueryFailure(transient);
+  if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) return mark(new QueryFailure(transient), true);
   // The authorizer denies *permissions*; SQLITE_AUTH is a permission signal.
   if (code.startsWith("SQLITE_PERM") || code.startsWith("SQLITE_AUTH")) return new AuthorizationFailed({});
   if (code.startsWith("SQLITE_CANTOPEN")) return new ConnectionFailure({});
@@ -230,7 +263,7 @@ const classifySqliteNumeric = (n: number, constraint: string): DbError | undefin
     case 787: return new ForeignKeyViolation({ constraint });
     case 1299: return new NotNullViolation({ constraint });
     case 275: return new CheckViolation({ constraint });
-    case 5: case 261: case 517: case 773: case 6: return new QueryFailure(transient); // BUSY/LOCKED
+    case 5: case 261: case 517: case 773: case 6: return mark(new QueryFailure(transient), true); // BUSY/LOCKED
     case 3: case 23: return new AuthorizationFailed({}); // PERM, AUTH
     case 14: return new ConnectionFailure({}); // CANTOPEN
     default: return new QueryFailure({});
@@ -238,8 +271,9 @@ const classifySqliteNumeric = (n: number, constraint: string): DbError | undefin
 };
 
 const classifyNodeCode = (code: string): DbError | undefined => {
-  if (CONNECTION_CODES_RE.test(code)) return new ConnectionFailure(transient);
-  if (TLS_CODES_RE.test(code)) return new ConnectionFailure({});
+  if (SAFE_CONNECT_CODES.has(code)) return mark(new ConnectionFailure(transient), true);
+  if (AMBIGUOUS_CONNECT_CODES.has(code)) return mark(new ConnectionFailure(transient), false);
+  if (TLS_CODES_RE.test(code)) return mark(new ConnectionFailure({}), false);
   return undefined;
 };
 
@@ -270,12 +304,12 @@ const classifyMessage = (raw: string, constraint: string): DbError | undefined =
   }
 
   // pg-pool / pg-client bare errors (no code property):
-  if (/timeout exceeded when trying to connect/i.test(message)) return new ConnectionFailure(transient);
-  if (/Connection terminated unexpectedly/i.test(message)) return new ConnectionFailure(transient);
-  if (/Connection terminated due to connection timeout/i.test(message)) return new ConnectionFailure(transient);
-  if (/^Connection terminated$/i.test(message.trim())) return new ConnectionFailure(transient);
-  if (/Client was closed and is not queryable/i.test(message)) return new ConnectionFailure({});
-  if (/Client has encountered a connection error/i.test(message)) return new ConnectionFailure({});
+  if (/timeout exceeded when trying to connect/i.test(message)) return mark(new ConnectionFailure(transient), true);
+  if (/Connection terminated due to connection timeout/i.test(message)) return mark(new ConnectionFailure(transient), true);
+  if (/Connection terminated unexpectedly/i.test(message)) return mark(new ConnectionFailure(transient), false);
+  if (/^Connection terminated$/i.test(message.trim())) return mark(new ConnectionFailure({}), false);
+  if (/Client was closed and is not queryable/i.test(message)) return mark(new ConnectionFailure({}), false);
+  if (/Client has encountered a connection error/i.test(message)) return mark(new ConnectionFailure({}), false);
 
   return undefined;
 };
@@ -380,26 +414,69 @@ const withCause = (error: DbError, cause: unknown): DbError => {
 const runDbQuery = <T>(query: PromiseLike<T> | (() => PromiseLike<T> | T)): PromiseLike<T> | T =>
   typeof query === "function" ? query() : query;
 
+/** Internal: may this classified error be auto-retried by the default policy? */
+const isRetrySafe = (error: DbError): boolean =>
+  (error as DbError & { retrySafe?: boolean }).retrySafe === true;
+
+/** Per-error retry delay — the "sensible defaults" behind retryTransient. */
+const retryDelay = (error: DbError, ctx: TryPromiseContext): number => {
+  const backoff = 2 ** (ctx.attempt - 1);
+  if (isConnectionFailure(error)) return 200 * backoff; // reconnect, wait longer
+  if (isQueryFailure(error)) return 50 * backoff;       // deadlock / serialization / busy
+  return 100 * backoff;
+};
+
+const DEFAULT_RETRY: RetryOptions<DbError> = {
+  times: 3,
+  delayMs: retryDelay,
+  shouldRetry: (e) => isRetrySafe(e),
+};
+
+/**
+ * Config for `tryDb`. An explicit `retry` always wins; without one, transient
+ * failures are auto-retried (`retryTransient`, default `true`) with sensible
+ * per-error defaults. Deterministic errors (constraints, auth, authz, syntax)
+ * and ambiguous outcomes (connection lost mid-query) are never auto-retried.
+ */
+export type TryDbConfig<E> = {
+  /** Auto-retry the transient set with per-error defaults. Default: `true`. */
+  retryTransient?: boolean;
+  /** Full retry policy override — you own `times`/`delayMs`/`shouldRetry`. */
+  retry?: RetryOptions<E>;
+  /** Abort signal forwarded to every attempt and retry delay. */
+  signal?: AbortSignal;
+};
+
 /**
  * Runs any database query and resolves the outcome as a `Result<T, DbError>`.
  *
- * Built on better-result's `Result.tryPromise`, so the config is the host
- * library's `RetryConfig`: `{ signal?, retry: { times, delayMs, backoff,
- * shouldRetry, jitter } }`. `shouldRetry` reads the `potentiallyTransient`
- * hint — the transient realm (connection loss, deadlock, busy, timeouts) is
- * handled by policy, never enumerated at every call site.
+ * Built on better-result's `Result.tryPromise`. Transient failures retry by
+ * default with per-error defaults; deterministic errors and ambiguous
+ * mid-query outcomes never retry. Hand an explicit `retry` to own the policy
+ * (a safe gate is injected unless you provide `shouldRetry`), or set
+ * `retryTransient: false` to disable auto-retry entirely.
  *
  * Errors that match no known protocol shape are **rethrown** (as a `Panic` in
  * `Result.gen` contexts) — they are not ours to label.
  */
 export const tryDb = async <T>(
   query: PromiseLike<T> | (() => PromiseLike<T> | T),
-  config?: RetryConfig<DbError>,
-): Promise<Result<T, DbError>> =>
-  Result.tryPromise(
+  config?: TryDbConfig<DbError>,
+): Promise<Result<T, DbError>> => {
+  const retryConfig: RetryConfig<DbError> | undefined = config?.retry
+    ? {
+        signal: config.signal,
+        retry: { ...config.retry, shouldRetry: config.retry.shouldRetry ?? ((e) => isRetrySafe(e)) },
+      }
+    : config?.retryTransient === false
+      ? (config.signal ? { signal: config.signal } : undefined)
+      : { signal: config?.signal, retry: DEFAULT_RETRY };
+
+  return Result.tryPromise(
     {
       try: () => Promise.resolve(runDbQuery(query)),
       catch: (cause: unknown): DbError => withCause(classify(cause), cause),
     },
-    config,
+    retryConfig,
   );
+};

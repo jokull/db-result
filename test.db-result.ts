@@ -122,7 +122,7 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
   test("53300 too-many-connections → transient (the one Effect misses)", async () => {
     const result = await tryDb(() => {
       throw pgError("53300", "sorry, too many clients already");
-    });
+    }, { retryTransient: false });
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/query-failure");
       expect(transientOf(result.error)).toBe(true);
@@ -146,7 +146,7 @@ describe("connection layer — Node system codes and pool/client messages", () =
       throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
         code: "ECONNREFUSED", errno: -61, syscall: "connect",
       });
-    });
+    }, { retryTransient: false });
     if (result.isErr()) {
       expect(isConnectionFailure(result.error)).toBe(true);
       expect(transientOf(result.error)).toBe(true);
@@ -157,7 +157,7 @@ describe("connection layer — Node system codes and pool/client messages", () =
     for (const code of ["ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN"]) {
       const result = await tryDb(() => {
         throw Object.assign(new Error(`connect ${code}`), { code });
-      });
+      }, { retryTransient: false });
       if (result.isErr()) {
         expect(isConnectionFailure(result.error)).toBe(true);
         expect(transientOf(result.error)).toBe(true);
@@ -178,7 +178,7 @@ describe("connection layer — Node system codes and pool/client messages", () =
   test("pool timeout message → connection-failure, transient", async () => {
     const result = await tryDb(() => {
       throw new Error("timeout exceeded when trying to connect");
-    });
+    }, { retryTransient: false });
     if (result.isErr()) {
       expect(isConnectionFailure(result.error)).toBe(true);
       expect(transientOf(result.error)).toBe(true);
@@ -300,7 +300,7 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("SQLITE_BUSY → query-failure with transient hint (retry by policy)", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
-    });
+    }, { retryTransient: false });
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/query-failure");
       expect(transientOf(result.error)).toBe(true);
@@ -353,7 +353,7 @@ describe("guards", () => {
     });
     const conn = await tryDb(() => {
       throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
-    });
+    }, { retryTransient: false });
     if (dupe.isErr()) {
       expect(isUniqueViolation(dupe.error)).toBe(true);
       expect(isConnectionFailure(dupe.error)).toBe(false);
@@ -475,47 +475,116 @@ describe("real libsql (@libsql/client, file::memory:)", () => {
   });
 });
 
-describe("retry config passthrough (better-result RetryConfig)", () => {
-  test("shouldRetry reads the potentiallyTransient hint", async () => {
+describe("retry policy — retryTransient defaults to true, per-error defaults", () => {
+  const deadlock = () => {
+    throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+  };
+
+  test("transient failures are retried by default with no config", async () => {
     let attempts = 0;
-    const result = await tryDb(
-      () => {
-        attempts += 1;
-        if (attempts < 3) {
-          throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
-        }
-        return "ok";
-      },
-      {
-        retry: {
-          times: 3,
-          delayMs: 1,
-          backoff: "constant",
-          shouldRetry: (e) => e.potentiallyTransient === true,
-        },
-      },
-    );
+    const result = await tryDb(() => {
+      attempts += 1;
+      if (attempts < 3) deadlock();
+      return "ok";
+    });
     expect(result.isOk()).toBe(true);
-    if (result.isOk()) expect(result.value).toBe("ok");
+    expect(attempts).toBe(3);
   });
 
-  test("non-transient errors are not retried", async () => {
+  test("deterministic errors are never retried by default", async () => {
+    let attempts = 0;
+    const result = await tryDb(() => {
+      attempts += 1;
+      throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+        code: "SQLITE_CONSTRAINT_UNIQUE",
+      });
+    });
+    expect(result.isErr()).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
+  test("ambiguous mid-query connection loss is never auto-retried", async () => {
+    let attempts = 0;
+    const result = await tryDb(() => {
+      attempts += 1;
+      throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    });
+    expect(result.isErr()).toBe(true);
+    expect(attempts).toBe(1);
+    if (result.isErr()) {
+      // still a hint: a custom policy may retry it deliberately
+      expect((result.error as { potentiallyTransient?: boolean }).potentiallyTransient).toBe(true);
+    }
+  });
+
+  test("connect-phase failures (ECONNREFUSED) are auto-retried", async () => {
+    let attempts = 0;
+    await tryDb(() => {
+      attempts += 1;
+      if (attempts < 2) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      return "connected";
+    });
+    expect(attempts).toBe(2);
+  });
+
+  test("retryTransient: false disables auto-retry", async () => {
     let attempts = 0;
     const result = await tryDb(
       () => {
         attempts += 1;
-        throw Object.assign(new Error("UNIQUE constraint failed: users.email"), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+        deadlock();
+      },
+      { retryTransient: false },
+    );
+    expect(result.isErr()).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
+  test("explicit retry overrides the defaults", async () => {
+    let attempts = 0;
+    const result = await tryDb(
+      () => {
+        attempts += 1;
+        deadlock();
+      },
+      { retry: { times: 2, delayMs: 1, backoff: "constant" } },
+    );
+    expect(result.isErr()).toBe(true);
+    expect(attempts).toBe(3); // initial + 2 retries
+  });
+
+  test("explicit retry without shouldRetry still gets the safe gate", async () => {
+    let attempts = 0;
+    const result = await tryDb(
+      () => {
+        attempts += 1;
+        throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+          code: "SQLITE_CONSTRAINT_UNIQUE",
+        });
+      },
+      { retry: { times: 3, delayMs: 1, backoff: "constant" } },
+    );
+    expect(result.isErr()).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
+  test("custom shouldRetry is honored verbatim", async () => {
+    let attempts = 0;
+    const result = await tryDb(
+      () => {
+        attempts += 1;
+        deadlock();
       },
       {
         retry: {
-          times: 3,
+          times: 5,
           delayMs: 1,
           backoff: "constant",
-          shouldRetry: (e) => e.potentiallyTransient === true,
+          shouldRetry: (e) => e._tag === "db/query-failure",
         },
       },
     );
     expect(result.isErr()).toBe(true);
-    expect(attempts).toBe(1);
+    expect(attempts).toBe(6); // initial + 5 retries
   });
 });

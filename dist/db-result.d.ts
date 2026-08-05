@@ -53,10 +53,6 @@ type RetryOptions<E> = {
     delayMs: (error: E, context: TryPromiseContext) => number;
     shouldRetry?: (error: E, context: TryPromiseContext) => boolean;
 };
-type RetryConfig<E> = {
-    signal?: AbortSignal;
-    retry?: RetryOptions<E>;
-};
 declare const UniqueViolation_base: import("better-result").TaggedErrorClass<"db/unique-violation">;
 declare class UniqueViolation extends UniqueViolation_base<{
     constraint: string;
@@ -117,16 +113,30 @@ export declare const isAuthorizationFailed: (e: unknown) => e is AuthorizationFa
 export declare const isSqlSyntaxError: (e: unknown) => e is SqlSyntaxError;
 export declare const isQueryFailure: (e: unknown) => e is QueryFailure;
 /**
+ * Config for `tryDb`. An explicit `retry` always wins; without one, transient
+ * failures are auto-retried (`retryTransient`, default `true`) with sensible
+ * per-error defaults. Deterministic errors (constraints, auth, authz, syntax)
+ * and ambiguous outcomes (connection lost mid-query) are never auto-retried.
+ */
+export type TryDbConfig<E> = {
+    /** Auto-retry the transient set with per-error defaults. Default: `true`. */
+    retryTransient?: boolean;
+    /** Full retry policy override — you own `times`/`delayMs`/`shouldRetry`. */
+    retry?: RetryOptions<E>;
+    /** Abort signal forwarded to every attempt and retry delay. */
+    signal?: AbortSignal;
+};
+/**
  * Runs any database query and resolves the outcome as a `Result<T, DbError>`.
  *
- * Built on better-result's `Result.tryPromise`, so the config is the host
- * library's `RetryConfig`: `{ signal?, retry: { times, delayMs, backoff,
- * shouldRetry, jitter } }`. `shouldRetry` reads the `potentiallyTransient`
- * hint — the transient realm (connection loss, deadlock, busy, timeouts) is
- * handled by policy, never enumerated at every call site.
+ * Built on better-result's `Result.tryPromise`. Transient failures retry by
+ * default with per-error defaults; deterministic errors and ambiguous
+ * mid-query outcomes never retry. Hand an explicit `retry` to own the policy
+ * (a safe gate is injected unless you provide `shouldRetry`), or set
+ * `retryTransient: false` to disable auto-retry entirely.
  *
  * Errors that match no known protocol shape are **rethrown** (as a `Panic` in
  * `Result.gen` contexts) — they are not ours to label.
  */
-export declare const tryDb: <T>(query: PromiseLike<T> | (() => PromiseLike<T> | T), config?: RetryConfig<DbError>) => Promise<Result<T, DbError>>;
+export declare const tryDb: <T>(query: PromiseLike<T> | (() => PromiseLike<T> | T), config?: TryDbConfig<DbError>) => Promise<Result<T, DbError>>;
 export {};
