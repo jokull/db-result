@@ -1,0 +1,12 @@
+{
+  "name": "better-result-db-errors",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "better-result": "^3.0.0"
+  },
+  "devDependencies": {
+    "pg": "^8.13.0"
+  }
+}
