@@ -6,7 +6,13 @@
  * package self-reference).
  */
 import { Result } from "better-result";
-import { tryDb, isUniqueViolation, type DbError } from "db-result";
+import {
+  tryDb,
+  isDbError,
+  isUniqueViolation,
+  isRetriedError,
+  type DbError,
+} from "db-result";
 
 const r: Promise<Result<number, DbError>> = tryDb(() => 1, { retryTransient: false });
 const r2: Promise<Result<number, DbError>> = tryDb(() => 1, {
@@ -17,7 +23,8 @@ const r2: Promise<Result<number, DbError>> = tryDb(() => 1, {
     shouldRetry: (e) => e.potentiallyTransient === true,
   },
 });
-const g = (e: unknown) => (isUniqueViolation(e) ? e.constraint : "nope");
+const g = (e: unknown) =>
+  isDbError(e) ? (isUniqueViolation(e) ? e.constraint : "db") : isRetriedError(e) ? `retried ${e.retries}x` : "other";
 
 void r;
 void r2;

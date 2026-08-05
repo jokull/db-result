@@ -107,6 +107,18 @@ await tryDb(q, {
 An explicit `retry` always wins — and the safe gate is injected even then: a custom
 policy without `shouldRetry` still won't retry a unique violation.
 
+**The thunk form is required for retry to function.** `tryDb(promise)` works, but a
+settled promise can't re-run — retries would re-await the same outcome and can never
+succeed. Pass a thunk: `tryDb(() => db.insert(...).returning())` (dev builds warn once
+when you pass a promise with retry active). Keep the thunk to the SQL statement — it
+runs once per attempt, so hoist async work (`await`-ed values) and any narrowed
+variables out of it.
+
+**Did a retry actually happen?** A failure that survived its retries carries a
+non-enumerable attempt count — `isRetriedError(err)` narrows to `err.retries` — so a
+handler can log _"deadlock retried 3× before failing"_ differently from a first-try
+error.
+
 ---
 
 ## The vocabulary
@@ -128,7 +140,9 @@ identity stays in `cause`, never in the tag.
 
 All nine classes are exported, plus guards: `isUniqueViolation(e)`, `isConnectionFailure(e)`,
 `isAuthenticationFailed(e)`, `isAuthorizationFailed(e)`, `isSqlSyntaxError(e)`,
-`isQueryFailure(e)` — `DbError` is the union.
+`isQueryFailure(e)` — and the boundary check `isDbError(e)` (true for the whole
+union) plus `isRetriedError(e)` (true when a failure survived retries, exposing
+`error.retries` as the attempt count). `DbError` is the union.
 
 Every classified error carries `potentiallyTransient?: boolean` — `true` for the
 retryable set, never for constraints or auth. It's a hint, not a policy: the
@@ -221,6 +235,12 @@ Requires drizzle **1.0+** — currently `1.0.0-rc.4`, which is exactly what we t
    domain errors (`EmailTaken`, `OrderInvalid`…); let `matchErrorPartial`'s terminal turn
    the rest into 500 + observability.
 3. **Attempt the insert is the uniqueness check** — including under races.
+
+> **Typing the fold terminal:** `matchErrorPartial`'s terminal slot is contravariant —
+> when your app's declared errors are stricter, wire-shaped tagged errors (e.g.
+> result-rpc's), type the terminal's parameter as the _wider_ better-result
+> `TaggedErrorLike`, or the 3-arg `matchErrorPartial(error, folds, terminal)` call stops
+> typechecking.
 
 ## Growth test
 

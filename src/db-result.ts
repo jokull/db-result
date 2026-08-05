@@ -157,6 +157,25 @@ export const isSqlSyntaxError = (e: unknown): e is SqlSyntaxError =>
   tagOf(e) === "db/sql-syntax-error";
 export const isQueryFailure = (e: unknown): e is QueryFailure => tagOf(e) === "db/query-failure";
 
+/** True when `e` is any of the nine `DbError` tags — the boundary check. */
+export const isDbError = (e: unknown): e is DbError =>
+  isUniqueViolation(e) ||
+  isForeignKeyViolation(e) ||
+  isNotNullViolation(e) ||
+  isCheckViolation(e) ||
+  isConnectionFailure(e) ||
+  isAuthenticationFailed(e) ||
+  isAuthorizationFailed(e) ||
+  isSqlSyntaxError(e) ||
+  isQueryFailure(e);
+
+/** A `DbError` that survived its retries — carries the attempt count. */
+export type RetriedDbError = DbError & { retries: number };
+
+/** True when the error went through ≥1 retry; `error.retries` is the attempt count. */
+export const isRetriedError = (e: unknown): e is RetriedDbError =>
+  typeof e === "object" && e !== null && typeof Reflect.get(e, "retries") === "number";
+
 // ─── Classification ──────────────────────────────────────────────────────────
 
 const DEFAULT_CONSTRAINT = "unknown";
@@ -516,6 +535,14 @@ export type TryDbConfig<E> = {
  * (a safe gate is injected unless you provide `shouldRetry`), or set
  * `retryTransient: false` to disable auto-retry entirely.
  *
+ * The thunk form is required for retry to function: a settled promise can't
+ * re-run, so `tryDb(promise)` retries the same outcome forever (a dev-mode
+ * warning fires once). Keep the thunk to the SQL statement — it runs once per
+ * attempt, so hoist async work and narrowed values out of it.
+ *
+ * A failure that survived retries carries a non-enumerable attempt count —
+ * see `isRetriedError` / `RetriedDbError`.
+ *
  * Errors that match no known protocol shape are **rethrown** (as a `Panic` in
  * `Result.gen` contexts) — they are not ours to label.
  */
@@ -537,11 +564,46 @@ export const tryDb = async <T>(
         : undefined
       : { signal: config?.signal, retry: DEFAULT_RETRY };
 
-  return Result.tryPromise(
+  if (typeof query !== "function" && retryConfig?.retry) warnPromiseForm();
+
+  let attempts = 0;
+  const result = await Result.tryPromise(
     {
-      try: () => Promise.resolve(runDbQuery(query)),
+      try: () => {
+        attempts += 1;
+        return Promise.resolve(runDbQuery(query));
+      },
       catch: (cause: unknown): DbError => withCause(classify(cause), cause),
     },
     retryConfig,
+  );
+
+  if (result.isErr() && attempts > 1) markRetried(result.error, attempts);
+  return result;
+};
+
+/** Attaches the attempt count (non-enumerable) after a failure survived retries. */
+const markRetried = (error: DbError, attempts: number): void => {
+  try {
+    Object.defineProperty(error, "retries", {
+      value: attempts,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  } catch {
+    // observability only; never fail over it.
+  }
+};
+
+let warnedPromiseForm = false;
+/** Dev-only, once-per-process warning: a settled promise can't re-run on retry. */
+const warnPromiseForm = (): void => {
+  if (warnedPromiseForm) return;
+  if (typeof process === "undefined" || process.env.NODE_ENV === "production") return;
+  warnedPromiseForm = true;
+  console.warn(
+    "[db-result] tryDb(promise): retries can't re-invoke a settled promise — the same outcome fails every attempt. " +
+      "Pass a thunk: tryDb(() => db.insert(...).returning()) so retries re-run the query.",
   );
 };
