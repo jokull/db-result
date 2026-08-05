@@ -13,6 +13,7 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsdown src/index.ts && tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build",
     "test": "bun test ./test.db-result.ts ./test.integration.ts",
     "typecheck": "tsc --noEmit"
   },

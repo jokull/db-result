@@ -1,5 +1,5 @@
 node_modules
-.dist
+dist
 *.db
 local.db*
 .consumer-check.ts
