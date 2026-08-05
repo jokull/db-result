@@ -1,12 +1,20 @@
 # db-result
 
-> Database failures as better-result tagged errors — `Result<T, DbError>`, driver-agnostic,
-> retry-aware. Stop hand-writing `instanceof` / `error.code` checks. **Attempt the insert —
-> that *is* the uniqueness check.**
+> Database failures as better-result tagged errors — `Result<T, DbError>`, **retry-safe**,
+> driver-agnostic. Stop hand-writing `instanceof` / `error.code` checks and hand-rolling
+> retry loops. **Attempt the insert — that *is* the uniqueness check** — we classify the
+> failure and decide what's worth retrying.
 
 ```sh
 bun add better-result db-result
 ```
+
+**The hard work, done for you:**
+- **Classify** every database failure into nine `db/*` tags — any driver, any ORM.
+- **Retry** the failures worth retrying, with per-error backoff — and never touch the
+  deterministic ones or the ambiguous ones where retrying could double-commit a write.
+- **Compose** — `Result<T, DbError>` out of any thenable or thunk, ready for
+  `Result.gen`, `matchErrorPartial`, and guards.
 
 ---
 
@@ -52,28 +60,47 @@ No `instanceof`, no `error.code === "23505"`, no try/catch. The union is the con
 not the work: unhandled tags default to 500, logged with their `cause`, and the types
 tell you exactly what you're choosing to ignore.
 
-**Retry by default — deterministic errors never retried:**
+Retry lives below — the short version: **on by default, and safe**.
+
+---
+
+## Retry — the hard part, done
+
+Retrying a database call sounds easy. It isn't:
+
+- Retry **everything** and you double-commit writes — the classic "the connection died
+  mid-INSERT, was it committed?" problem.
+- Retry **nothing** and deadlocks, lock contention and a busy database crash your app
+  for no reason.
+- Get the **backoff** wrong and you hammer a sick database into the ground.
+
+`db-result` makes these calls for you. `retryTransient` defaults to `true`:
+
+| error | auto-retry? | default backoff |
+|---|---|---|
+| deadlock `40P01` / serialization `40001` / lock-timeout `55P03` / statement-timeout `57014` | ✅ | 50ms × 2ⁿ |
+| too-many-connections `53300` | ✅ | 50ms × 2ⁿ |
+| `SQLITE_BUSY` / `SQLITE_LOCKED` | ✅ | 50ms × 2ⁿ |
+| connect-refused / DNS / connect-timeout (`ECONNREFUSED`, `ENOTFOUND`, …) | ✅ | 200ms × 2ⁿ |
+| unique / foreign-key / not-null / check / auth / authz / syntax | ❌ deterministic — retrying is theater | — |
+| connection lost **mid-query** (`08006`, `ECONNRESET`, …) | ❌ ambiguous — the write may have committed | — (still flagged `potentiallyTransient` for a deliberate policy) |
+
+That last row is the one everyone gets wrong: retrying a mid-query connection loss can
+duplicate the write you thought failed. We flag it, we don't retry it — you still can,
+on purpose.
 
 ```ts
 const created = await tryDb(() => db.insert(users).values({ email }).returning());
-// transient failures are auto-retried with sensible per-error defaults:
-//   deadlock / serialization / lock-timeout / busy  → short backoff
-//   connect-refused / too-many-connections         → reconnect backoff
-// Deterministic errors (constraints, auth, authz, syntax) are never retried,
-// and neither are ambiguous outcomes (connection lost mid-query — the write
-// may have committed).
-```
+// transient failures auto-retry with the backoffs above — zero config
 
-Opt out, or own the policy:
-
-```ts
-await tryDb(q, { retryTransient: false });          // never auto-retry
-await tryDb(q, {                                    // you own times/delay/shouldRetry
-  retry: { times: 5, delayMs: 50, backoff: "exponential", shouldRetry: (e) => e.potentiallyTransient },
+await tryDb(q, { retryTransient: false });   // never auto-retry
+await tryDb(q, {                             // take over: you own times/delay/shouldRetry
+  retry: { times: 5, delayMs: 50, backoff: "exponential" },
 });
 ```
 
-An explicit `retry` always wins; if you don't provide `shouldRetry`, the safe gate is injected so deterministic errors still never retry.
+An explicit `retry` always wins — and the safe gate is injected even then: a custom
+policy without `shouldRetry` still won't retry a unique violation.
 
 ---
 
@@ -99,12 +126,9 @@ All nine classes are exported, plus guards: `isUniqueViolation(e)`, `isConnectio
 `isQueryFailure(e)` — `DbError` is the union.
 
 Every classified error carries `potentiallyTransient?: boolean` — `true` for the
-retryable set (connection loss, deadlock, serialization, lock/busy contention,
-timeouts), never for constraints or auth. Retry is a policy decision, not a tag:
-`tryDb` retries the transient set by default (`retryTransient`, default `true`)
-with per-error defaults — but skips *ambiguous* outcomes (connection lost
-mid-query, where the write may have committed): those stay `potentiallyTransient`
-as a hint for your own deliberate policy, never as an automatic retry.
+retryable set, never for constraints or auth. It's a hint, not a policy: the
+[retry section](#retry--the-hard-part-done) owns the policy and auto-retries only
+the safe subset.
 
 ---
 
