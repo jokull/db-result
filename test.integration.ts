@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import pg from "pg";
-import { tryDb } from "./db-result.ts";
+import { tryDb } from "./src/db-result.ts";
 
 const dsn = process.env.PGTEST_DSN;
 const describeReal = dsn ? describe : describe.skip;
