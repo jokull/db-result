@@ -2,7 +2,7 @@
 
 > Database failures as better-result tagged errors — `Result<T, DbError>`, **retry-safe**,
 > driver-agnostic. Stop hand-writing `instanceof` / `error.code` checks and hand-rolling
-> retry loops. **Attempt the insert — that *is* the uniqueness check** — we classify the
+> retry loops. **Attempt the insert — that _is_ the uniqueness check** — we classify the
 > failure and decide what's worth retrying.
 
 ```sh
@@ -10,6 +10,7 @@ bun add better-result db-result
 ```
 
 **The hard work, done for you:**
+
 - **Classify** every database failure into nine `db/*` tags — any driver, any ORM.
 - **Retry** the failures worth retrying, with per-error backoff — and never touch the
   deterministic ones or the ambiguous ones where retrying could double-commit a write.
@@ -27,10 +28,13 @@ import { tryDb } from "db-result";
 const handleSignup = async (c: Context) => {
   const outcome = await Result.gen(async function* () {
     // yield* short-circuits on Err; the error union accumulates across yields
-    const body   = yield* Result.await(parseBody(c.req));           // Err: BodyError
-    const [user] = yield* Result.await(tryDb(() =>                  // Err: DbError
-      db.insert(users).values({ email: body.email }).returning(),
-    ));
+    const body = yield* Result.await(parseBody(c.req)); // Err: BodyError
+    const [user] = yield* Result.await(
+      tryDb(() =>
+        // Err: DbError
+        db.insert(users).values({ email: body.email }).returning(),
+      ),
+    );
     return Result.ok(c.json({ id: user.id }, 201));
   });
   // outcome: Result<Response, BodyError | DbError> — hover it and see the full union
@@ -42,7 +46,7 @@ const handleSignup = async (c: Context) => {
     outcome.error,
     {
       "db/unique-violation": (e) => c.json({ error: "email_taken", constraint: e.constraint }, 409),
-      "body/invalid":        (e) => c.json({ error: "invalid_body", issues: e.issues }, 422),
+      "body/invalid": (e) => c.json({ error: "invalid_body", issues: e.issues }, 422),
     },
     (unhandled) => {
       // the compiler spells out what you're choosing to ignore:
@@ -76,14 +80,14 @@ Retrying a database call sounds easy. It isn't:
 
 `db-result` makes these calls for you. `retryTransient` defaults to `true`:
 
-| error | auto-retry? | default backoff |
-|---|---|---|
-| deadlock `40P01` / serialization `40001` / lock-timeout `55P03` / statement-timeout `57014` | ✅ | 50ms × 2ⁿ |
-| too-many-connections `53300` | ✅ | 50ms × 2ⁿ |
-| `SQLITE_BUSY` / `SQLITE_LOCKED` | ✅ | 50ms × 2ⁿ |
-| connect-refused / DNS / connect-timeout (`ECONNREFUSED`, `ENOTFOUND`, …) | ✅ | 200ms × 2ⁿ |
-| unique / foreign-key / not-null / check / auth / authz / syntax | ❌ deterministic — retrying is theater | — |
-| connection lost **mid-query** (`08006`, `ECONNRESET`, …) | ❌ ambiguous — the write may have committed | — (still flagged `potentiallyTransient` for a deliberate policy) |
+| error                                                                                       | auto-retry?                                 | default backoff                                                  |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
+| deadlock `40P01` / serialization `40001` / lock-timeout `55P03` / statement-timeout `57014` | ✅                                          | 50ms × 2ⁿ                                                        |
+| too-many-connections `53300`                                                                | ✅                                          | 50ms × 2ⁿ                                                        |
+| `SQLITE_BUSY` / `SQLITE_LOCKED`                                                             | ✅                                          | 50ms × 2ⁿ                                                        |
+| connect-refused / DNS / connect-timeout (`ECONNREFUSED`, `ENOTFOUND`, …)                    | ✅                                          | 200ms × 2ⁿ                                                       |
+| unique / foreign-key / not-null / check / auth / authz / syntax                             | ❌ deterministic — retrying is theater      | —                                                                |
+| connection lost **mid-query** (`08006`, `ECONNRESET`, …)                                    | ❌ ambiguous — the write may have committed | — (still flagged `potentiallyTransient` for a deliberate policy) |
 
 That last row is the one everyone gets wrong: retrying a mid-query connection loss can
 duplicate the write you thought failed. We flag it, we don't retry it — you still can,
@@ -93,8 +97,9 @@ on purpose.
 const created = await tryDb(() => db.insert(users).values({ email }).returning());
 // transient failures auto-retry with the backoffs above — zero config
 
-await tryDb(q, { retryTransient: false });   // never auto-retry
-await tryDb(q, {                             // take over: you own times/delay/shouldRetry
+await tryDb(q, { retryTransient: false }); // never auto-retry
+await tryDb(q, {
+  // take over: you own times/delay/shouldRetry
   retry: { times: 5, delayMs: 50, backoff: "exponential" },
 });
 ```
@@ -109,17 +114,17 @@ policy without `shouldRetry` still won't retry a unique violation.
 Nine tags. Protocol-agnostic: the tag means the same thing on any database — the driver
 identity stays in `cause`, never in the tag.
 
-| tag | carries | meaning |
-|---|---|---|
-| `db/unique-violation` | `constraint` | unique or primary-key conflict |
-| `db/foreign-key-violation` | `constraint` | referenced row doesn't exist |
-| `db/not-null-violation` | `constraint` | required value absent |
-| `db/check-violation` | `constraint` | a check rejected the value |
-| `db/connection-failure` | — | couldn't reach / lost the database |
-| `db/authentication-failed` | — | credentials rejected |
-| `db/authorization-failed` | — | insufficient permission |
-| `db/sql-syntax-error` | — | the SQL (or schema reference) is wrong |
-| `db/query-failure` | — | everything else that's a database failure |
+| tag                        | carries      | meaning                                   |
+| -------------------------- | ------------ | ----------------------------------------- |
+| `db/unique-violation`      | `constraint` | unique or primary-key conflict            |
+| `db/foreign-key-violation` | `constraint` | referenced row doesn't exist              |
+| `db/not-null-violation`    | `constraint` | required value absent                     |
+| `db/check-violation`       | `constraint` | a check rejected the value                |
+| `db/connection-failure`    | —            | couldn't reach / lost the database        |
+| `db/authentication-failed` | —            | credentials rejected                      |
+| `db/authorization-failed`  | —            | insufficient permission                   |
+| `db/sql-syntax-error`      | —            | the SQL (or schema reference) is wrong    |
+| `db/query-failure`         | —            | everything else that's a database failure |
 
 All nine classes are exported, plus guards: `isUniqueViolation(e)`, `isConnectionFailure(e)`,
 `isAuthenticationFailed(e)`, `isAuthorizationFailed(e)`, `isSqlSyntaxError(e)`,
@@ -138,14 +143,14 @@ the safe subset.
 (plus the payload slots Effect wrappers use — `cause`/`failure`/`error`/`defect`) to reach
 the error that carries the protocol fields:
 
-| Protocol | Signal | Drivers |
-|---|---|---|
-| PostgreSQL SQLSTATE | `code: "23505"` + `constraint` field | `pg`, `postgres.js`, Drizzle over pg |
+| Protocol              | Signal                                              | Drivers                                         |
+| --------------------- | --------------------------------------------------- | ----------------------------------------------- |
+| PostgreSQL SQLSTATE   | `code: "23505"` + `constraint` field                | `pg`, `postgres.js`, Drizzle over pg            |
 | SQLite extended codes | `code: "SQLITE_CONSTRAINT_UNIQUE"`, `errcode: 2067` | better-sqlite3, node:sqlite, libsql, bun:sqlite |
-| SQLite message shapes | `"UNIQUE constraint failed: t.c"` | D1, wa-sqlite, anything that sets no code |
-| MySQL protocol | `errno: 1062` / `code: "ER_DUP_ENTRY"` | mysql2 |
-| SQL Server | `number: 2627` | mssql |
-| Connection layer | `code: "ECONNREFUSED"`, pool messages | every driver — Node system errors |
+| SQLite message shapes | `"UNIQUE constraint failed: t.c"`                   | D1, wa-sqlite, anything that sets no code       |
+| MySQL protocol        | `errno: 1062` / `code: "ER_DUP_ENTRY"`              | mysql2                                          |
+| SQL Server            | `number: 2627`                                      | mssql                                           |
+| Connection layer      | `code: "ECONNREFUSED"`, pool messages               | every driver — Node system errors               |
 
 So the same classifier works at the driver-call level — `client.query(...)`,
 `db.prepare(...).run()`, `db.insert(...)` are all just thenables — and it sees through
@@ -154,7 +159,7 @@ is duck-typed but strictly guarded: only `^[0-9A-Z]{5}$` codes count as SQLSTATE
 enumerated prefixes count as driver codes, and constraint extraction accepts dotted
 identifiers only — query text and parameters can never leak into the error data.
 
-## What `tryDb` does *not* classify
+## What `tryDb` does _not_ classify
 
 `tryDb` classifies **database failures** — nothing else. An error that matches no known
 protocol shape is **rethrown**, loudly, as the bug it is. A `TypeError` from your own
@@ -176,23 +181,23 @@ bun run test:integration # the full real-driver pass
 docker compose down
 ```
 
-| Driver | Signal | Proof |
-|---|---|---|
-| `pg` | SQLSTATE + constraint | real — Docker postgres |
-| `postgres.js` | SQLSTATE | real — Docker postgres |
-| `mysql2` | `errno` | real — Docker mysql |
-| `mssql` | `number` | real — Docker sqlserver |
-| `bun:sqlite` | codes / errcode | real — embedded |
-| `node:sqlite` | `errcode` | real — Node runner |
-| `better-sqlite3` | code strings | real — embedded |
-| D1 | message shapes + cause | real — miniflare |
-| `libsql` | extended codes | real — `file:` embedded |
-| `wa-sqlite` | numeric code | fixtures |
-| Drizzle 1.0+ | wrapper chain | real — wrapping its queries |
+| Driver           | Signal                 | Proof                       |
+| ---------------- | ---------------------- | --------------------------- |
+| `pg`             | SQLSTATE + constraint  | real — Docker postgres      |
+| `postgres.js`    | SQLSTATE               | real — Docker postgres      |
+| `mysql2`         | `errno`                | real — Docker mysql         |
+| `mssql`          | `number`               | real — Docker sqlserver     |
+| `bun:sqlite`     | codes / errcode        | real — embedded             |
+| `node:sqlite`    | `errcode`              | real — Node runner          |
+| `better-sqlite3` | code strings           | real — embedded             |
+| D1               | message shapes + cause | real — miniflare            |
+| `libsql`         | extended codes         | real — `file:` embedded     |
+| `wa-sqlite`      | numeric code           | fixtures                    |
+| Drizzle 1.0+     | wrapper chain          | real — wrapping its queries |
 
 ## Drizzle
 
-db-result is a **caller, not a wrapper**. It wraps the *outcome* of any thenable —
+db-result is a **caller, not a wrapper**. It wraps the _outcome_ of any thenable —
 including a drizzle 1.0+ query — and classifies the underlying driver error through
 drizzle's wrapper via the cause chain. Drizzle's API is untouched; you keep building
 queries your way:

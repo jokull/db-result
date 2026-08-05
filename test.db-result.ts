@@ -22,7 +22,8 @@ import {
 } from "./src/db-result.ts";
 
 const constraintOf = (e: DbError): string => (e as { constraint?: string }).constraint ?? "";
-const transientOf = (e: DbError): boolean => (e as { potentiallyTransient?: boolean }).potentiallyTransient ?? false;
+const transientOf = (e: DbError): boolean =>
+  (e as { potentiallyTransient?: boolean }).potentiallyTransient ?? false;
 
 describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
   const pgError = (code: string, message: string, constraint?: string) =>
@@ -30,7 +31,11 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
 
   test("23505 → unique violation, constraint from the field", async () => {
     const result = await tryDb(() => {
-      throw pgError("23505", 'duplicate key value violates unique constraint "users_email_key"', "users_email_key");
+      throw pgError(
+        "23505",
+        'duplicate key value violates unique constraint "users_email_key"',
+        "users_email_key",
+      );
     });
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
@@ -42,21 +47,33 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
 
   test("23503 → foreign-key violation", async () => {
     const result = await tryDb(() => {
-      throw pgError("23503", 'insert or update on table "orders" violates foreign key constraint "orders_user_id_fkey"', "orders_user_id_fkey");
+      throw pgError(
+        "23503",
+        'insert or update on table "orders" violates foreign key constraint "orders_user_id_fkey"',
+        "orders_user_id_fkey",
+      );
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/foreign-key-violation");
   });
 
   test("23502 → not-null violation", async () => {
     const result = await tryDb(() => {
-      throw pgError("23502", 'null value in column "email" of relation "users" violates not-null constraint', "users_email_not_null");
+      throw pgError(
+        "23502",
+        'null value in column "email" of relation "users" violates not-null constraint',
+        "users_email_not_null",
+      );
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/not-null-violation");
   });
 
   test("23514 → check violation", async () => {
     const result = await tryDb(() => {
-      throw pgError("23514", 'new row for relation "users" violates check constraint "users_age_check"', "users_age_check");
+      throw pgError(
+        "23514",
+        'new row for relation "users" violates check constraint "users_age_check"',
+        "users_age_check",
+      );
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/check-violation");
   });
@@ -80,7 +97,7 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
 
   test("08xxx connection SQLSTATE → connection-failure, transient", async () => {
     const result = await tryDb(() => {
-      throw pgError("08006", 'terminating connection due to administrator command');
+      throw pgError("08006", "terminating connection due to administrator command");
     });
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/connection-failure");
@@ -97,7 +114,7 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
 
   test("42501 → authorization-failed (checked before 42* syntax)", async () => {
     const result = await tryDb(() => {
-      throw pgError("42501", 'permission denied for table users');
+      throw pgError("42501", "permission denied for table users");
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/authorization-failed");
   });
@@ -120,9 +137,12 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
   });
 
   test("53300 too-many-connections → transient (the one Effect misses)", async () => {
-    const result = await tryDb(() => {
-      throw pgError("53300", "sorry, too many clients already");
-    }, { retryTransient: false });
+    const result = await tryDb(
+      () => {
+        throw pgError("53300", "sorry, too many clients already");
+      },
+      { retryTransient: false },
+    );
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/query-failure");
       expect(transientOf(result.error)).toBe(true);
@@ -142,11 +162,16 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
 
 describe("connection layer — Node system codes and pool/client messages", () => {
   test("ECONNREFUSED → connection-failure, transient", async () => {
-    const result = await tryDb(() => {
-      throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
-        code: "ECONNREFUSED", errno: -61, syscall: "connect",
-      });
-    }, { retryTransient: false });
+    const result = await tryDb(
+      () => {
+        throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+          code: "ECONNREFUSED",
+          errno: -61,
+          syscall: "connect",
+        });
+      },
+      { retryTransient: false },
+    );
     if (result.isErr()) {
       expect(isConnectionFailure(result.error)).toBe(true);
       expect(transientOf(result.error)).toBe(true);
@@ -155,9 +180,12 @@ describe("connection layer — Node system codes and pool/client messages", () =
 
   test("ETIMEDOUT / ENOTFOUND / EAI_AGAIN → connection-failure", async () => {
     for (const code of ["ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN"]) {
-      const result = await tryDb(() => {
-        throw Object.assign(new Error(`connect ${code}`), { code });
-      }, { retryTransient: false });
+      const result = await tryDb(
+        () => {
+          throw Object.assign(new Error(`connect ${code}`), { code });
+        },
+        { retryTransient: false },
+      );
       if (result.isErr()) {
         expect(isConnectionFailure(result.error)).toBe(true);
         expect(transientOf(result.error)).toBe(true);
@@ -167,7 +195,9 @@ describe("connection layer — Node system codes and pool/client messages", () =
 
   test("TLS certificate failure → connection-failure, not transient", async () => {
     const result = await tryDb(() => {
-      throw Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" });
+      throw Object.assign(new Error("self-signed certificate"), {
+        code: "DEPTH_ZERO_SELF_SIGNED_CERT",
+      });
     });
     if (result.isErr()) {
       expect(isConnectionFailure(result.error)).toBe(true);
@@ -176,9 +206,12 @@ describe("connection layer — Node system codes and pool/client messages", () =
   });
 
   test("pool timeout message → connection-failure, transient", async () => {
-    const result = await tryDb(() => {
-      throw new Error("timeout exceeded when trying to connect");
-    }, { retryTransient: false });
+    const result = await tryDb(
+      () => {
+        throw new Error("timeout exceeded when trying to connect");
+      },
+      { retryTransient: false },
+    );
     if (result.isErr()) {
       expect(isConnectionFailure(result.error)).toBe(true);
       expect(transientOf(result.error)).toBe(true);
@@ -205,7 +238,9 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   });
 
   test("D1 real shape — D1_ERROR prefix + (code NNNN NAME[NNNN]) suffix, nested under cause", async () => {
-    const driver = new Error("UNIQUE constraint failed: users.email (code 2067 SQLITE_CONSTRAINT_UNIQUE[2067])");
+    const driver = new Error(
+      "UNIQUE constraint failed: users.email (code 2067 SQLITE_CONSTRAINT_UNIQUE[2067])",
+    );
     const result = await tryDb(() => {
       throw new Error("D1_ERROR: " + driver.message, { cause: driver });
     });
@@ -227,7 +262,9 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("node:sqlite extended result code (errcode 2067)", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
-        code: "ERR_SQLITE_ERROR", errcode: 2067, errstr: "constraint failed",
+        code: "ERR_SQLITE_ERROR",
+        errcode: 2067,
+        errstr: "constraint failed",
       });
     });
     if (result.isErr()) {
@@ -246,7 +283,10 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("libsql extendedCode string", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("SQLITE_ERROR: UNIQUE constraint failed: users.email"), {
-        name: "LibsqlError", code: "SQLITE_ERROR", extendedCode: "SQLITE_CONSTRAINT_PRIMARYKEY", rawCode: 1555,
+        name: "LibsqlError",
+        code: "SQLITE_ERROR",
+        extendedCode: "SQLITE_CONSTRAINT_PRIMARYKEY",
+        rawCode: 1555,
       });
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
@@ -255,7 +295,8 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("libsql network error → connection-failure", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("CLIENT_NETWORK_ERROR: failed to connect"), {
-        name: "LibsqlError", code: "CLIENT_NETWORK_ERROR",
+        name: "LibsqlError",
+        code: "CLIENT_NETWORK_ERROR",
       });
     });
     if (result.isErr()) expect(isConnectionFailure(result.error)).toBe(true);
@@ -273,7 +314,8 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("foreign key (errcode 787)", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("FOREIGN KEY constraint failed"), {
-        code: "ERR_SQLITE_ERROR", errcode: 787,
+        code: "ERR_SQLITE_ERROR",
+        errcode: 787,
       });
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/foreign-key-violation");
@@ -282,7 +324,8 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("not-null (errcode 1299)", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("NOT NULL constraint failed: users.email"), {
-        code: "ERR_SQLITE_ERROR", errcode: 1299,
+        code: "ERR_SQLITE_ERROR",
+        errcode: 1299,
       });
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/not-null-violation");
@@ -291,16 +334,20 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
   test("check (errcode 275)", async () => {
     const result = await tryDb(() => {
       throw Object.assign(new Error("CHECK constraint failed: users.age"), {
-        code: "ERR_SQLITE_ERROR", errcode: 275,
+        code: "ERR_SQLITE_ERROR",
+        errcode: 275,
       });
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/check-violation");
   });
 
   test("SQLITE_BUSY → query-failure with transient hint (retry by policy)", async () => {
-    const result = await tryDb(() => {
-      throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
-    }, { retryTransient: false });
+    const result = await tryDb(
+      () => {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+      },
+      { retryTransient: false },
+    );
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/query-failure");
       expect(transientOf(result.error)).toBe(true);
@@ -309,7 +356,9 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
 
   test("SQLITE_PERM → authorization-failed (permission, not identity)", async () => {
     const result = await tryDb(() => {
-      throw Object.assign(new Error("attempt to write a readonly database"), { code: "SQLITE_PERM" });
+      throw Object.assign(new Error("attempt to write a readonly database"), {
+        code: "SQLITE_PERM",
+      });
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/authorization-failed");
   });
@@ -337,7 +386,9 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
 
   test("query text and params never leak into data", async () => {
     const result = await tryDb(() => {
-      throw new Error("UNIQUE constraint failed: users.email, INSERT INTO users VALUES ('admin','hunter2')");
+      throw new Error(
+        "UNIQUE constraint failed: users.email, INSERT INTO users VALUES ('admin','hunter2')",
+      );
     });
     if (result.isErr()) {
       expect(constraintOf(result.error)).toBe("users.email");
@@ -349,18 +400,28 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
 describe("guards", () => {
   test("isUniqueViolation narrows correctly", async () => {
     const dupe = await tryDb(() => {
-      throw Object.assign(new Error("UNIQUE constraint failed: users.email"), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+      throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+        code: "SQLITE_CONSTRAINT_UNIQUE",
+      });
     });
-    const conn = await tryDb(() => {
-      throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
-    }, { retryTransient: false });
+    const conn = await tryDb(
+      () => {
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      },
+      { retryTransient: false },
+    );
     if (dupe.isErr()) {
       expect(isUniqueViolation(dupe.error)).toBe(true);
       expect(isConnectionFailure(dupe.error)).toBe(false);
       if (isUniqueViolation(dupe.error)) expect(dupe.error.constraint).toContain("users");
     }
     if (conn.isErr()) expect(isConnectionFailure(conn.error)).toBe(true);
-    for (const g of [isAuthenticationFailed, isAuthorizationFailed, isSqlSyntaxError, isQueryFailure]) {
+    for (const g of [
+      isAuthenticationFailed,
+      isAuthorizationFailed,
+      isSqlSyntaxError,
+      isQueryFailure,
+    ]) {
       expect(g(null)).toBe(false);
     }
   });
@@ -369,7 +430,9 @@ describe("guards", () => {
 describe("cause-chain unwrapping", () => {
   test("sees through a DrizzleQueryError-style wrapper", async () => {
     const driverError = Object.assign(new Error("UNIQUE constraint failed: users.email"), {
-      code: "ERR_SQLITE_ERROR", errcode: 2067, errstr: "constraint failed",
+      code: "ERR_SQLITE_ERROR",
+      errcode: 2067,
+      errstr: "constraint failed",
     });
     const wrapper = Object.assign(new Error("Query failed"), { cause: driverError });
     const result = await tryDb(() => {
@@ -418,14 +481,24 @@ describe("the contract — errors that are not database failures are rethrown", 
 
   test("fs-style codes (ENOENT) are not misclassified as connection failures", async () => {
     const fsError = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
-    await expect(tryDb(() => { throw fsError; })).rejects.toBeDefined();
+    await expect(
+      tryDb(() => {
+        throw fsError;
+      }),
+    ).rejects.toBeDefined();
   });
 
   test("mysql2 errors are not misclassified by the core (driver modules own them)", async () => {
     const mysql = Object.assign(new Error("Duplicate entry 'a@b.com' for key 'users.email'"), {
-      code: "ER_DUP_ENTRY", errno: 1062, sqlState: "23000",
+      code: "ER_DUP_ENTRY",
+      errno: 1062,
+      sqlState: "23000",
     });
-    await expect(tryDb(() => { throw mysql; })).rejects.toBeDefined();
+    await expect(
+      tryDb(() => {
+        throw mysql;
+      }),
+    ).rejects.toBeDefined();
   });
 });
 
@@ -521,7 +594,8 @@ describe("retry policy — retryTransient defaults to true, per-error defaults",
     let attempts = 0;
     await tryDb(() => {
       attempts += 1;
-      if (attempts < 2) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      if (attempts < 2)
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
       return "connected";
     });
     expect(attempts).toBe(2);

@@ -1,35 +1,77 @@
 {
-  "name": "better-result-db-errors",
+  "name": "db-result",
   "version": "0.0.1",
   "private": true,
+  "description": "Database failures as better-result tagged errors — Result<T, DbError>, retry-safe, driver-agnostic.",
+  "keywords": [
+    "better-result",
+    "database",
+    "driver",
+    "drizzle",
+    "error-handling",
+    "postgres",
+    "result",
+    "retry",
+    "sql",
+    "sqlite"
+  ],
+  "homepage": "https://github.com/jokull/db-result#readme",
+  "bugs": {
+    "url": "https://github.com/jokull/db-result/issues"
+  },
+  "license": "MIT",
+  "author": "jokull",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jokull/db-result.git"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
-  "description": "Database failures as better-result tagged errors — Result<T, DbError>, driver-agnostic, retry-aware.",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
     }
   },
-  "files": ["dist"],
   "scripts": {
-    "build": "tsdown src/index.ts && tsc -p tsconfig.build.json",
+    "build": "tsdown",
     "prepublishOnly": "bun run build",
     "test": "bun test ./test.db-result.ts ./test.integration.ts",
-    "typecheck": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "lint": "oxlint .",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "check:exports": "bunx publint && bunx attw --pack",
+    "check:typescript-minimum": "bun x --yes --package typescript@5.4.5 tsc -p tsconfig.typescript-minimum.json"
   },
   "dependencies": {
     "better-result": "^3.0.0"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@arethetypeswrong/core": "^0.18.5",
     "@libsql/client": "^0.17.4",
-    "@types/bun": "^1.3.14",
-    "@types/pg": "^8.20.4",
+    "@types/bun": "latest",
+    "@types/pg": "^8.11.0",
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "1.0.0-rc.4",
     "miniflare": "^5.20260801.0-alpha",
+    "oxfmt": "^0.23.0",
+    "oxlint": "^1.38.0",
     "pg": "^8.13.0",
     "postgres": "^3.4.9",
-    "tsdown": "^0.2.0",
+    "publint": "^0.3.23",
+    "tsdown": "^0.22.14",
     "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

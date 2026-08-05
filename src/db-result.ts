@@ -155,8 +155,7 @@ export const isAuthorizationFailed = (e: unknown): e is AuthorizationFailed =>
   tagOf(e) === "db/authorization-failed";
 export const isSqlSyntaxError = (e: unknown): e is SqlSyntaxError =>
   tagOf(e) === "db/sql-syntax-error";
-export const isQueryFailure = (e: unknown): e is QueryFailure =>
-  tagOf(e) === "db/query-failure";
+export const isQueryFailure = (e: unknown): e is QueryFailure => tagOf(e) === "db/query-failure";
 
 // ─── Classification ──────────────────────────────────────────────────────────
 
@@ -169,7 +168,13 @@ const SQLSTATE_RE = /^[0-9A-Z]{5}$/;
 
 /** Connect-phase failures — the channel was never established; safe to retry. */
 const SAFE_CONNECT_CODES = new Set([
-  "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "ECONNABORTED",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNABORTED",
 ]);
 /** Mid-query channel loss — the outcome is unknown; hint, not auto-retry. */
 const AMBIGUOUS_CONNECT_CODES = new Set(["ECONNRESET", "EPIPE"]);
@@ -199,8 +204,7 @@ const constraintFrom = (node: object): string => {
   if (!isString(message)) return DEFAULT_CONSTRAINT;
 
   // SQLite: `UNIQUE constraint failed: table.column[, table.column …]`
-  const sqlite =
-    /constraint failed: ([\w]+(?:\.[\w]+)+)(?:,\s*[\w]+(?:\.[\w]+)+)*/i.exec(message);
+  const sqlite = /constraint failed: ([\w]+(?:\.[\w]+)+)(?:,\s*[\w]+(?:\.[\w]+)+)*/i.exec(message);
   if (sqlite?.[1]) return sqlite[1].trim();
   // Postgres: `duplicate key value violates unique constraint "name"`
   const pg = /constraint "([^"]+)"/.exec(message);
@@ -209,12 +213,19 @@ const constraintFrom = (node: object): string => {
 
 const classifySQLSTATE = (code: string, constraint: string): DbError => {
   switch (code) {
-    case "23505": return new UniqueViolation({ constraint }); // incl. primary key
-    case "23503": return new ForeignKeyViolation({ constraint });
-    case "23502": return new NotNullViolation({ constraint });
-    case "23514": return new CheckViolation({ constraint });
-    case "28P01": case "28000": return new AuthenticationFailed({});
-    case "42501": return new AuthorizationFailed({}); // before the 42* catch-all
+    case "23505":
+      return new UniqueViolation({ constraint }); // incl. primary key
+    case "23503":
+      return new ForeignKeyViolation({ constraint });
+    case "23502":
+      return new NotNullViolation({ constraint });
+    case "23514":
+      return new CheckViolation({ constraint });
+    case "28P01":
+    case "28000":
+      return new AuthenticationFailed({});
+    case "42501":
+      return new AuthorizationFailed({}); // before the 42* catch-all
   }
   if (code.startsWith("08")) {
     // Connect-phase SQLSTATEs are safe to auto-retry; mid-query loss and state
@@ -227,7 +238,13 @@ const classifySQLSTATE = (code: string, constraint: string): DbError => {
   if (code.startsWith("42")) return new SqlSyntaxError({});
   // Transient set — the ones Effect's pg classifier misses (53300). Safe to
   // auto-retry: a failed statement / aborted transaction leaves nothing committed.
-  if (code === "40001" || code === "40P01" || code === "55P03" || code === "57014" || code === "53300") {
+  if (
+    code === "40001" ||
+    code === "40P01" ||
+    code === "55P03" ||
+    code === "57014" ||
+    code === "53300"
+  ) {
     return mark(new QueryFailure(transient), true);
   }
   // Server shutting down — connection realm; only "starting up" is retry-safe.
@@ -237,17 +254,23 @@ const classifySQLSTATE = (code: string, constraint: string): DbError => {
 };
 
 const classifySqliteCodeString = (code: string, constraint: string): DbError | undefined => {
-  if (code.startsWith("SQLITE_CONSTRAINT_UNIQUE") || code.startsWith("SQLITE_CONSTRAINT_PRIMARYKEY")) {
+  if (
+    code.startsWith("SQLITE_CONSTRAINT_UNIQUE") ||
+    code.startsWith("SQLITE_CONSTRAINT_PRIMARYKEY")
+  ) {
     return new UniqueViolation({ constraint });
   }
-  if (code.startsWith("SQLITE_CONSTRAINT_FOREIGNKEY")) return new ForeignKeyViolation({ constraint });
+  if (code.startsWith("SQLITE_CONSTRAINT_FOREIGNKEY"))
+    return new ForeignKeyViolation({ constraint });
   if (code.startsWith("SQLITE_CONSTRAINT_NOTNULL")) return new NotNullViolation({ constraint });
   if (code.startsWith("SQLITE_CONSTRAINT_CHECK")) return new CheckViolation({ constraint });
   if (code.startsWith("SQLITE_CONSTRAINT")) return new QueryFailure({});
   // BUSY/LOCKED are transient contention, not a tag — retry by policy.
-  if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) return mark(new QueryFailure(transient), true);
+  if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"))
+    return mark(new QueryFailure(transient), true);
   // The authorizer denies *permissions*; SQLITE_AUTH is a permission signal.
-  if (code.startsWith("SQLITE_PERM") || code.startsWith("SQLITE_AUTH")) return new AuthorizationFailed({});
+  if (code.startsWith("SQLITE_PERM") || code.startsWith("SQLITE_AUTH"))
+    return new AuthorizationFailed({});
   if (code.startsWith("SQLITE_CANTOPEN")) return new ConnectionFailure({});
   if (code.startsWith("SQLITE_")) return new QueryFailure({});
   // libsql client errors: network layer.
@@ -259,14 +282,28 @@ const classifySqliteNumeric = (n: number, constraint: string): DbError | undefin
   // Exact extended codes — never mask & 0xff (that's how Effect loses
   // unique-vs-other specificity for node:sqlite's 2067).
   switch (n) {
-    case 2067: case 1555: return new UniqueViolation({ constraint }); // unique, PK
-    case 787: return new ForeignKeyViolation({ constraint });
-    case 1299: return new NotNullViolation({ constraint });
-    case 275: return new CheckViolation({ constraint });
-    case 5: case 261: case 517: case 773: case 6: return mark(new QueryFailure(transient), true); // BUSY/LOCKED
-    case 3: case 23: return new AuthorizationFailed({}); // PERM, AUTH
-    case 14: return new ConnectionFailure({}); // CANTOPEN
-    default: return new QueryFailure({});
+    case 2067:
+    case 1555:
+      return new UniqueViolation({ constraint }); // unique, PK
+    case 787:
+      return new ForeignKeyViolation({ constraint });
+    case 1299:
+      return new NotNullViolation({ constraint });
+    case 275:
+      return new CheckViolation({ constraint });
+    case 5:
+    case 261:
+    case 517:
+    case 773:
+    case 6:
+      return mark(new QueryFailure(transient), true); // BUSY/LOCKED
+    case 3:
+    case 23:
+      return new AuthorizationFailed({}); // PERM, AUTH
+    case 14:
+      return new ConnectionFailure({}); // CANTOPEN
+    default:
+      return new QueryFailure({});
   }
 };
 
@@ -282,34 +319,47 @@ const classifyMessage = (raw: string, constraint: string): DbError | undefined =
   const message = raw.replace(/^D1_ERROR:\s*/i, "");
 
   // D1 appends the extended code: `(code 2067 SQLITE_CONSTRAINT_UNIQUE[2067])`
-  const d1 = /\(code (\d+) (SQLITE_[A-Z_]+)/i.exec(message);
-  if (d1) {
-    const classified = classifySqliteCodeString(d1[2], constraint);
+  const d1 = /(\(code (\d+) (SQLITE_[A-Z_]+))/i.exec(message);
+  const d1Name = d1?.[3];
+  if (d1Name) {
+    const classified = classifySqliteCodeString(d1Name, constraint);
     if (classified) return classified;
   }
 
-  if (/^UNIQUE constraint failed:/i.test(message) || /^PRIMARY KEY constraint failed:/i.test(message)) {
+  if (
+    /^UNIQUE constraint failed:/i.test(message) ||
+    /^PRIMARY KEY constraint failed:/i.test(message)
+  ) {
     return new UniqueViolation({ constraint });
   }
-  if (/^FOREIGN KEY constraint failed/i.test(message)) return new ForeignKeyViolation({ constraint });
+  if (/^FOREIGN KEY constraint failed/i.test(message))
+    return new ForeignKeyViolation({ constraint });
   if (/^NOT NULL constraint failed:/i.test(message)) return new NotNullViolation({ constraint });
   if (/^CHECK constraint failed:/i.test(message)) return new CheckViolation({ constraint });
   if (/no such (table|column|function)/i.test(message)) return new SqlSyntaxError({});
 
   // Common SQLite failure messages that carry no code — clearly sqlite, no tag.
   if (
-    /database or disk is full|disk image is malformed|file is not a database|attempt to write a readonly database|out of memory|disk I\/O error|unable to open database file/i.test(message)
+    /database or disk is full|disk image is malformed|file is not a database|attempt to write a readonly database|out of memory|disk I\/O error|unable to open database file/i.test(
+      message,
+    )
   ) {
     return new QueryFailure({});
   }
 
   // pg-pool / pg-client bare errors (no code property):
-  if (/timeout exceeded when trying to connect/i.test(message)) return mark(new ConnectionFailure(transient), true);
-  if (/Connection terminated due to connection timeout/i.test(message)) return mark(new ConnectionFailure(transient), true);
-  if (/Connection terminated unexpectedly/i.test(message)) return mark(new ConnectionFailure(transient), false);
-  if (/^Connection terminated$/i.test(message.trim())) return mark(new ConnectionFailure({}), false);
-  if (/Client was closed and is not queryable/i.test(message)) return mark(new ConnectionFailure({}), false);
-  if (/Client has encountered a connection error/i.test(message)) return mark(new ConnectionFailure({}), false);
+  if (/timeout exceeded when trying to connect/i.test(message))
+    return mark(new ConnectionFailure(transient), true);
+  if (/Connection terminated due to connection timeout/i.test(message))
+    return mark(new ConnectionFailure(transient), true);
+  if (/Connection terminated unexpectedly/i.test(message))
+    return mark(new ConnectionFailure(transient), false);
+  if (/^Connection terminated$/i.test(message.trim()))
+    return mark(new ConnectionFailure({}), false);
+  if (/Client was closed and is not queryable/i.test(message))
+    return mark(new ConnectionFailure({}), false);
+  if (/Client has encountered a connection error/i.test(message))
+    return mark(new ConnectionFailure({}), false);
 
   return undefined;
 };
@@ -339,7 +389,11 @@ const classifyNode = (node: Classifiable): DbError | undefined => {
   // 2. SQLite code strings — libsql's specific `extendedCode` first, so a
   //    generic `SQLITE_ERROR` code never shadows it, then the `code` itself.
   const extendedCode = get(node, "extendedCode");
-  const sqliteCode = isString(extendedCode) ? (extendedCode as string) : isString(code) ? code : undefined;
+  const sqliteCode = isString(extendedCode)
+    ? (extendedCode as string)
+    : isString(code)
+      ? code
+      : undefined;
   if (sqliteCode) {
     const classified = classifySqliteCodeString(sqliteCode, constraint);
     if (classified) return classified;
@@ -348,7 +402,13 @@ const classifyNode = (node: Classifiable): DbError | undefined => {
   // 3. SQLite numeric errcodes (wa-sqlite puts the number in `code`)
   const errcode = get(node, "errcode");
   const rawCode = get(node, "rawCode");
-  const numeric = isNumber(errcode) ? errcode : isNumber(rawCode) ? rawCode : isNumber(code) ? code : undefined;
+  const numeric = isNumber(errcode)
+    ? errcode
+    : isNumber(rawCode)
+      ? rawCode
+      : isNumber(code)
+        ? code
+        : undefined;
   if (numeric !== undefined && hasSqliteSignal(node)) {
     const classified = classifySqliteNumeric(numeric, constraint);
     if (classified) return classified;
@@ -422,7 +482,7 @@ const isRetrySafe = (error: DbError): boolean =>
 const retryDelay = (error: DbError, ctx: TryPromiseContext): number => {
   const backoff = 2 ** (ctx.attempt - 1);
   if (isConnectionFailure(error)) return 200 * backoff; // reconnect, wait longer
-  if (isQueryFailure(error)) return 50 * backoff;       // deadlock / serialization / busy
+  if (isQueryFailure(error)) return 50 * backoff; // deadlock / serialization / busy
   return 100 * backoff;
 };
 
@@ -466,10 +526,15 @@ export const tryDb = async <T>(
   const retryConfig: RetryConfig<DbError> | undefined = config?.retry
     ? {
         signal: config.signal,
-        retry: { ...config.retry, shouldRetry: config.retry.shouldRetry ?? ((e) => isRetrySafe(e)) },
+        retry: {
+          ...config.retry,
+          shouldRetry: config.retry.shouldRetry ?? ((e) => isRetrySafe(e)),
+        },
       }
     : config?.retryTransient === false
-      ? (config.signal ? { signal: config.signal } : undefined)
+      ? config.signal
+        ? { signal: config.signal }
+        : undefined
       : { signal: config?.signal, retry: DEFAULT_RETRY };
 
   return Result.tryPromise(

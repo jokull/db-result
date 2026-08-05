@@ -3,11 +3,16 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
     "lib": ["ES2022"],
     "strict": true,
-    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
     "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
     "types": ["bun"]
   },
   "include": ["src", "test.db-result.ts", "test.integration.ts"]

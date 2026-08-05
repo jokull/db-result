@@ -1,5 +1,38 @@
+# dependencies (bun install)
 node_modules
+
+# output
+out
 dist
+*.tgz
+
+# coverage
+coverage
+*.lcov
+
+# logs
+logs
+*.log
+
+# env
+.env
+.env.*
+
+# caches
+.cache
+*.tsbuildinfo
+.eslintcache
+
+# tooling
+.wrangler
+
+# IDE / OS
+.idea
+.DS_Store
+
+# database scratch
 *.db
 local.db*
+
+# scratch
 .consumer-check.ts

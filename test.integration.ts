@@ -31,11 +31,18 @@ describeReal("real node-postgres", () => {
         )`);
 
       // Baseline: a clean insert is Ok with the row.
-      const first = await tryDb(client.query("INSERT INTO users (email, age) VALUES ($1, $2) RETURNING id", ["a@b.com", 30]));
+      const first = await tryDb(
+        client.query("INSERT INTO users (email, age) VALUES ($1, $2) RETURNING id", [
+          "a@b.com",
+          30,
+        ]),
+      );
       expect(first.isOk()).toBe(true);
 
       // Unique violation — the canonical "attempt the insert" race check.
-      const dupe = await tryDb(client.query("INSERT INTO users (email, age) VALUES ($1, $2)", ["a@b.com", 40]));
+      const dupe = await tryDb(
+        client.query("INSERT INTO users (email, age) VALUES ($1, $2)", ["a@b.com", 40]),
+      );
       expect(dupe.isErr()).toBe(true);
       if (dupe.isErr()) {
         expect(dupe.error._tag).toBe("db/unique-violation");
@@ -58,7 +65,9 @@ describeReal("real node-postgres", () => {
       }
 
       // Check.
-      const chk = await tryDb(client.query("INSERT INTO users (email, age) VALUES ($1, $2)", ["c@d.com", -5]));
+      const chk = await tryDb(
+        client.query("INSERT INTO users (email, age) VALUES ($1, $2)", ["c@d.com", -5]),
+      );
       expect(chk.isErr()).toBe(true);
       if (chk.isErr()) {
         expect(chk.error._tag).toBe("db/check-violation");
