@@ -6,13 +6,7 @@
  * package self-reference).
  */
 import { Result } from "better-result";
-import {
-  tryDb,
-  isDbError,
-  isUniqueViolation,
-  isRetriedError,
-  type DbError,
-} from "db-result";
+import { tryDb, isDbError, isUniqueViolation, isRetriedError, type DbError } from "db-result";
 
 const r: Promise<Result<number, DbError>> = tryDb(() => 1, { retryTransient: false });
 const r2: Promise<Result<number, DbError>> = tryDb(() => 1, {
@@ -23,9 +17,29 @@ const r2: Promise<Result<number, DbError>> = tryDb(() => 1, {
     shouldRetry: (e) => e.potentiallyTransient === true,
   },
 });
+
+// the shape lattice compiles on the minimum TS: declared params narrow the
+// union (both assignable to the full Result, so this is a compile smoke)
+const r3 = tryDb((tx: { isTransaction: true }) => {
+  void tx;
+  return 1;
+});
+const r4 = tryDb(async (q: { groupBy(): unknown }) => {
+  void q;
+  return "read";
+});
+
 const g = (e: unknown) =>
-  isDbError(e) ? (isUniqueViolation(e) ? e.constraint : "db") : isRetriedError(e) ? `retried ${e.retries}x` : "other";
+  isDbError(e)
+    ? isUniqueViolation(e)
+      ? e.constraint
+      : "db"
+    : isRetriedError(e)
+      ? `retried ${e.retries}x`
+      : "other";
 
 void r;
 void r2;
+void r3;
+void r4;
 void g;

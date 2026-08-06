@@ -15,5 +15,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["src", "test.db-result.ts", "test.integration.ts"]
+  "include": ["src", "test.db-result.ts", "test.integration.ts", "test.types.ts"]
 }

@@ -9,9 +9,21 @@
 bun add better-result db-result
 ```
 
+## Docs for coding agents
+
+The skill at [`skills/db-result/SKILL.md`](skills/db-result/SKILL.md) is the
+starting point for agents: an escalation ladder (new to better-result → install →
+migrate → reference) and a task map. The canonical, maintained documentation —
+the full 14-tag vocabulary, per-driver unions, the shape lattice, retry doctrine,
+and transaction guide — lives in
+[`skills/db-result/references/`](skills/db-result/references/).
+
 **The hard work, done for you:**
 
-- **Classify** every database failure into nine `db/*` tags — any driver, any ORM.
+- **Classify** every database failure into fourteen `db/*` tags — any driver, any ORM.
+- **Narrow** the error union from the thunk's parameter type — declare a Kysely
+  `Transaction`, a Drizzle `PgSelect`, a Prisma `UserFindManyArgs`, and the
+  impossible tags compile out of your union.
 - **Retry** the failures worth retrying, with per-error backoff — and never touch the
   deterministic ones or the ambiguous ones where retrying could double-commit a write.
 - **Compose** — `Result<T, DbError>` out of any thenable or thunk, ready for
@@ -51,8 +63,8 @@ const handleSignup = async (c: Context) => {
     (unhandled) => {
       // the compiler spells out what you're choosing to ignore:
       //   db/foreign-key-violation | db/not-null-violation | db/check-violation |
-      //   db/connection-failure | db/authentication-failed | db/authorization-failed |
-      //   db/sql-syntax-error | db/query-failure
+      //   db/connect-failure | db/connection-lost | db/authentication-failed |
+      //   db/authorization-failed | db/sql-syntax-error | db/query-failure
       reportError(unhandled); // tag + cause + stack → your observability
       return c.json({ error: "internal" }, 500);
     },
@@ -123,31 +135,66 @@ error.
 
 ## The vocabulary
 
-Nine tags. Protocol-agnostic: the tag means the same thing on any database — the driver
-identity stays in `cause`, never in the tag.
+Fourteen tags. Protocol-agnostic: the tag means the same thing on any database — the
+driver identity stays in `cause`, never in the tag.
 
-| tag                        | carries      | meaning                                   |
-| -------------------------- | ------------ | ----------------------------------------- |
-| `db/unique-violation`      | `constraint` | unique or primary-key conflict            |
-| `db/foreign-key-violation` | `constraint` | referenced row doesn't exist              |
-| `db/not-null-violation`    | `constraint` | required value absent                     |
-| `db/check-violation`       | `constraint` | a check rejected the value                |
-| `db/connection-failure`    | —            | couldn't reach / lost the database        |
-| `db/authentication-failed` | —            | credentials rejected                      |
-| `db/authorization-failed`  | —            | insufficient permission                   |
-| `db/sql-syntax-error`      | —            | the SQL (or schema reference) is wrong    |
-| `db/query-failure`         | —            | everything else that's a database failure |
+| tag                        | carries      | meaning                                                |
+| -------------------------- | ------------ | ------------------------------------------------------ |
+| `db/unique-violation`      | `constraint` | unique or primary-key conflict                         |
+| `db/foreign-key-violation` | `constraint` | referenced row doesn't exist                           |
+| `db/not-null-violation`    | `constraint` | required value absent                                  |
+| `db/check-violation`       | `constraint` | a check rejected the value                             |
+| `db/data-error`            | —            | value too long, numeric overflow, invalid text input   |
+| `db/deadlock`              | —            | deadlock or serialization failure                      |
+| `db/lock-timeout`          | —            | waited too long for a lock (incl. `SQLITE_BUSY`)       |
+| `db/transaction-aborted`   | —            | the transaction is dead (`25P02`, `P2028`)             |
+| `db/connect-failure`       | —            | channel never established (refused, DNS, pool timeout) |
+| `db/connection-lost`       | —            | channel died mid-query — outcome unknown               |
+| `db/authentication-failed` | —            | credentials rejected                                   |
+| `db/authorization-failed`  | —            | insufficient permission                                |
+| `db/sql-syntax-error`      | —            | the SQL (or schema reference) is wrong                 |
+| `db/query-failure`         | —            | everything else that's a database failure              |
 
-All nine classes are exported, plus guards: `isUniqueViolation(e)`, `isConnectionFailure(e)`,
-`isAuthenticationFailed(e)`, `isAuthorizationFailed(e)`, `isSqlSyntaxError(e)`,
-`isQueryFailure(e)` — and the boundary check `isDbError(e)` (true for the whole
-union) plus `isRetriedError(e)` (true when a failure survived retries, exposing
-`error.retries` as the attempt count). `DbError` is the union.
+All fourteen classes are exported, plus a guard per tag (`isUniqueViolation(e)`,
+`isDeadlock(e)`, `isConnectFailure(e)`, `isConnectionLost(e)`, …), the family guard
+`isConnectionFailure(e)` (either connection tag), and the boundary check
+`isDbError(e)` (true for the whole union) plus `isRetriedError(e)` (true when a
+failure survived retries, exposing `error.retries` as the attempt count). `DbError`
+is the union.
 
 Every classified error carries `potentiallyTransient?: boolean` — `true` for the
 retryable set, never for constraints or auth. It's a hint, not a policy: the
 [retry section](#retry--the-hard-part-done) owns the policy and auto-retries only
 the safe subset.
+
+---
+
+## Shape-aware types — the union narrows itself
+
+`tryDb` reads the thunk's **parameter type** as evidence of what the query can and
+cannot do, and narrows the error union to what that shape can actually produce.
+Declare the parameter; the impossible tags compile out:
+
+```ts
+// a transaction client: begin succeeded → authn/connect-failure impossible
+tryDb((tx: Transaction<DB>) => tx.insertInto("users").values({ email }).execute());
+//                                  ^ Result<T, DbError minus {authn, connect-failure}>
+
+// a select builder: constraints are write-only → gone from the union
+tryDb((q: SelectQueryBuilder<DB, "users", {}>) => db.selectFrom("users").selectAll().execute());
+//                                  ^ Result<T, DbError minus {4 constraints, tx-aborted}>
+
+// a delete builder: FK is the only constraint a DELETE can hit
+tryDb((q: DeleteQueryBuilder<DB, "users", {}>) =>
+  db.deleteFrom("users").where("id", "=", 1).execute(),
+);
+```
+
+Zero runtime cost — the probes compile away. A one-arg thunk whose parameter proves
+no shape is a compile error on purpose: the lattice never silently degrades to the
+full union. The full lattice (Kysely/Drizzle/Prisma probes, per-driver ledgers, the
+"reads that write" footgun, the honest ceilings) is in
+[`references/shapes.md`](skills/db-result/references/shapes.md).
 
 ---
 
@@ -262,8 +309,11 @@ that serializes the instance.
 ```sh
 bun install
 bun test                  # fixtures + embedded drivers — zero setup
-docker compose up -d
-bun run test:integration  # real pg, postgres.js, mysql2, mssql
+docker compose up -d --wait
+PGTEST_DSN="postgres://postgres:postgres@127.0.0.1:5433/postgres" \
+MYSQLTEST_DSN="mysql://root:root@127.0.0.1:3307" \
+MSSQLTEST_DSN="mssql://sa:DbResult!Passw0rd@127.0.0.1:1434/master" \
+bun run test:integration  # real pg, mysql2, mssql (DSN-less engines skip)
 docker compose down
 ```
 

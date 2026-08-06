@@ -12,9 +12,12 @@ import { Database } from "bun:sqlite";
 import { createClient } from "@libsql/client";
 import {
   tryDb,
+  tryTx,
   isDbError,
   isUniqueViolation,
   isConnectionFailure,
+  isConnectFailure,
+  isConnectionLost,
   isRetriedError,
   isAuthenticationFailed,
   isAuthorizationFailed,
@@ -97,13 +100,25 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
     }
   });
 
-  test("08xxx connection SQLSTATE → connection-failure, transient", async () => {
+  test("08006 mid-query loss → connection-lost, transient hint", async () => {
     const result = await tryDb(() => {
       throw pgError("08006", "terminating connection due to administrator command");
     });
     if (result.isErr()) {
-      expect(result.error._tag).toBe("db/connection-failure");
+      expect(result.error._tag).toBe("db/connection-lost");
       expect(transientOf(result.error)).toBe(true);
+      expect(isConnectionLost(result.error)).toBe(true);
+    }
+  });
+
+  test("08001 connect refused → connect-failure, retry-safe", async () => {
+    const result = await tryDb(() => {
+      throw pgError("08001", "could not establish connection");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/connect-failure");
+      expect(transientOf(result.error)).toBe(true);
+      expect(isConnectFailure(result.error)).toBe(true);
     }
   });
 
@@ -128,12 +143,12 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
     if (result.isErr()) expect(result.error._tag).toBe("db/sql-syntax-error");
   });
 
-  test("40P01 deadlock → query-failure with transient hint", async () => {
+  test("40P01 deadlock → db/deadlock, transient", async () => {
     const result = await tryDb(() => {
       throw pgError("40P01", "deadlock detected");
     });
     if (result.isErr()) {
-      expect(result.error._tag).toBe("db/query-failure");
+      expect(result.error._tag).toBe("db/deadlock");
       expect(transientOf(result.error)).toBe(true);
     }
   });
@@ -151,12 +166,12 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
     }
   });
 
-  test("unrecognised SQLSTATE → query-failure (still a pg failure)", async () => {
+  test("22001 → db/data-error (deterministic)", async () => {
     const result = await tryDb(() => {
       throw pgError("22001", "value too long for type character varying(255)");
     });
     if (result.isErr()) {
-      expect(result.error._tag).toBe("db/query-failure");
+      expect(result.error._tag).toBe("db/data-error");
       expect(transientOf(result.error)).toBe(false);
     }
   });
@@ -343,7 +358,7 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
     if (result.isErr()) expect(result.error._tag).toBe("db/check-violation");
   });
 
-  test("SQLITE_BUSY → query-failure with transient hint (retry by policy)", async () => {
+  test("SQLITE_BUSY → db/lock-timeout with transient hint (retry by policy)", async () => {
     const result = await tryDb(
       () => {
         throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
@@ -351,7 +366,7 @@ describe("SQLite family — D1, node:sqlite, better-sqlite3, libsql, wa-sqlite",
       { retryTransient: false },
     );
     if (result.isErr()) {
-      expect(result.error._tag).toBe("db/query-failure");
+      expect(result.error._tag).toBe("db/lock-timeout");
       expect(transientOf(result.error)).toBe(true);
     }
   });
@@ -480,7 +495,7 @@ describe("guards", () => {
     });
     const result = await tryDb(settled);
     expect(result.isErr()).toBe(true);
-    if (result.isErr()) expect(result.error._tag).toBe("db/query-failure");
+    if (result.isErr()) expect(result.error._tag).toBe("db/deadlock");
   });
 });
 
@@ -505,6 +520,20 @@ describe("cause-chain unwrapping", () => {
       throw effectShaped;
     });
     if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
+  });
+
+  test("classifies mssql ELOGIN login failures (no number field)", async () => {
+    // mssql ConnectionError: code ELOGIN, tedious originalError carries no number
+    const wrapper = Object.assign(new Error("Login failed for user 'sa'"), {
+      code: "ELOGIN",
+      originalError: Object.assign(new Error("Login failed for user 'sa'"), {
+        code: "ELOGIN",
+      }),
+    });
+    const result = await tryDb(() => {
+      throw wrapper;
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/authentication-failed");
   });
 
   test("original driver error retained as non-enumerable cause", async () => {
@@ -545,17 +574,165 @@ describe("the contract — errors that are not database failures are rethrown", 
     ).rejects.toBeDefined();
   });
 
-  test("mysql2 errors are not misclassified by the core (driver modules own them)", async () => {
+  test("mysql2 ER_DUP_ENTRY → unique violation (tables live in core)", async () => {
     const mysql = Object.assign(new Error("Duplicate entry 'a@b.com' for key 'users.email'"), {
       code: "ER_DUP_ENTRY",
       errno: 1062,
       sqlState: "23000",
     });
-    await expect(
-      tryDb(() => {
-        throw mysql;
-      }),
-    ).rejects.toBeDefined();
+    const result = await tryDb(() => {
+      throw mysql;
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/unique-violation");
+      expect(transientOf(result.error)).toBe(false);
+    }
+  });
+});
+
+describe("message-only drivers — the code-stripping paths", () => {
+  // aws-data-api (RDS Data API), xata-http, netlify-db, pg-proxy, neon-http:
+  // the SQLSTATE code never reaches the error — only the PG message text.
+  test("aws-data-api shape: message-only unique violation", async () => {
+    const result = await tryDb(() => {
+      throw Object.assign(
+        new Error('duplicate key value violates unique constraint "users_email_key"'),
+        {
+          code: "BadRequestException",
+          name: "BadRequestException",
+        },
+      );
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/unique-violation");
+      expect(constraintOf(result.error)).toBe("users_email_key");
+    }
+  });
+
+  test("message-only FK / not-null / check", async () => {
+    const fk = await tryDb(() => {
+      throw new Error(
+        'insert or update on table "orders" violates foreign key constraint "orders_user_id_fkey"',
+      );
+    });
+    if (fk.isErr()) {
+      expect(fk.error._tag).toBe("db/foreign-key-violation");
+      expect(constraintOf(fk.error)).toBe("orders_user_id_fkey");
+    }
+
+    const nn = await tryDb(() => {
+      throw new Error(
+        'null value in column "email" of relation "users" violates not-null constraint',
+      );
+    });
+    if (nn.isErr()) expect(nn.error._tag).toBe("db/not-null-violation");
+
+    const chk = await tryDb(() => {
+      throw new Error('new row for relation "users" violates check constraint "users_age_check"');
+    });
+    if (chk.isErr()) {
+      expect(chk.error._tag).toBe("db/check-violation");
+      expect(constraintOf(chk.error)).toBe("users_age_check");
+    }
+  });
+
+  test("message-only pg auth / authz / syntax / missing object", async () => {
+    const authn = await tryDb(() => {
+      throw new Error('password authentication failed for user "app"');
+    });
+    if (authn.isErr()) expect(authn.error._tag).toBe("db/authentication-failed");
+
+    const authz = await tryDb(() => {
+      throw new Error("permission denied for table users");
+    });
+    if (authz.isErr()) expect(authz.error._tag).toBe("db/authorization-failed");
+
+    const syntax = await tryDb(() => {
+      throw new Error('syntax error at or near "SELEC"');
+    });
+    if (syntax.isErr()) expect(syntax.error._tag).toBe("db/sql-syntax-error");
+
+    const missing = await tryDb(() => {
+      throw new Error('relation "users" does not exist');
+    });
+    if (missing.isErr()) expect(missing.error._tag).toBe("db/sql-syntax-error");
+  });
+
+  // planetscale-serverless / tidb-serverless / mysql-proxy: vitess/TiDB strip
+  // the ER_* code; the mysql message text survives.
+  test("planetscale shape: message-only duplicate entry", async () => {
+    const result = await tryDb(() => {
+      throw new Error("Duplicate entry 'a@b.com' for key 'users.email'");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/unique-violation");
+      expect(constraintOf(result.error)).toBe("users.email");
+    }
+  });
+
+  test("message-only mysql FK / not-null / syntax / auth", async () => {
+    const fk = await tryDb(() => {
+      throw new Error("Cannot add or update a child row: a foreign key constraint fails");
+    });
+    if (fk.isErr()) expect(fk.error._tag).toBe("db/foreign-key-violation");
+
+    const nn = await tryDb(() => {
+      throw new Error("Column 'email' cannot be null");
+    });
+    if (nn.isErr()) expect(nn.error._tag).toBe("db/not-null-violation");
+
+    const syntax = await tryDb(() => {
+      throw new Error("You have an error in your SQL syntax; check the manual");
+    });
+    if (syntax.isErr()) expect(syntax.error._tag).toBe("db/sql-syntax-error");
+
+    const authn = await tryDb(() => {
+      throw new Error("Access denied for user 'app'@'localhost'");
+    });
+    if (authn.isErr()) expect(authn.error._tag).toBe("db/authentication-failed");
+  });
+});
+
+describe("Turso Database (Rust engine) — message-only JS binding", () => {
+  // `drizzle-orm/tursodatabase*` wraps the new Turso Database (codename
+  // Limbo), not the libsql C fork. Its JS binding surfaces errors as plain
+  // messages — MVCC write-write conflicts and plain busy are both transient
+  // contention: retry the WHOLE transaction (tryTx); statement retry is
+  // futile (the conflict aborted the tx), which the tx-shape's retry-off
+  // already assumes.
+  test("MVCC write-write conflict → db/lock-timeout, transient", async () => {
+    const result = await tryDb(() => {
+      throw new Error("Write-write conflict");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("BusySnapshot → db/lock-timeout, transient", async () => {
+    const result = await tryDb(() => {
+      throw new Error(
+        "Database snapshot is stale. You must rollback and retry the whole transaction.",
+      );
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("message-only 'database is locked' → db/lock-timeout", async () => {
+    const result = await tryDb(
+      () => {
+        throw new Error("database is locked");
+      },
+      { retryTransient: false },
+    );
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
   });
 });
 
@@ -658,6 +835,31 @@ describe("retry policy — retryTransient defaults to true, per-error defaults",
     expect(attempts).toBe(2);
   });
 
+  test("the split: connect-failure retries, connection-lost never does", async () => {
+    let connectAttempts = 0;
+    const connect = await tryDb(() => {
+      connectAttempts += 1;
+      if (connectAttempts < 2)
+        throw Object.assign(new Error("connect ENETUNREACH"), { code: "ENETUNREACH" });
+      return "ok";
+    });
+    expect(connect.isOk()).toBe(true);
+    expect(connectAttempts).toBe(2);
+
+    let lostAttempts = 0;
+    const lost = await tryDb(() => {
+      lostAttempts += 1;
+      throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    });
+    expect(lost.isErr()).toBe(true);
+    expect(lostAttempts).toBe(1);
+    if (lost.isErr()) {
+      expect(lost.error._tag).toBe("db/connection-lost");
+      expect(isConnectFailure(lost.error)).toBe(false);
+      expect(isConnectionLost(lost.error)).toBe(true);
+    }
+  });
+
   test("retryTransient: false disables auto-retry", async () => {
     let attempts = 0;
     const result = await tryDb(
@@ -711,11 +913,424 @@ describe("retry policy — retryTransient defaults to true, per-error defaults",
           times: 5,
           delayMs: 1,
           backoff: "constant",
-          shouldRetry: (e) => e._tag === "db/query-failure",
+          shouldRetry: (e) => e._tag === "db/deadlock",
         },
       },
     );
     expect(result.isErr()).toBe(true);
     expect(attempts).toBe(6); // initial + 5 retries
+  });
+});
+
+describe("tag expansion — deadlock, lock-timeout, data-error, transaction-aborted", () => {
+  const pgError = (code: string, message: string) =>
+    Object.assign(new Error(message), { severity: "ERROR", code, schema: "public" });
+
+  test("40001 serialization folds into db/deadlock (same retry decision)", async () => {
+    const result = await tryDb(() => {
+      throw pgError("40001", "could not serialize access due to concurrent update");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/deadlock");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("55P03 lock-timeout → db/lock-timeout, transient", async () => {
+    const result = await tryDb(() => {
+      throw pgError("55P03", "lock_not_available");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("25P02 → db/transaction-aborted, never retried", async () => {
+    let attempts = 0;
+    const result = await tryDb(() => {
+      attempts += 1;
+      throw pgError(
+        "25P02",
+        "current transaction is aborted, commands ignored until end of transaction block",
+      );
+    });
+    expect(attempts).toBe(1);
+    if (result.isErr()) expect(result.error._tag).toBe("db/transaction-aborted");
+  });
+
+  test("22003/22P02 → db/data-error", async () => {
+    for (const code of ["22003", "22P02"]) {
+      const result = await tryDb(() => {
+        throw pgError(code, `boom ${code}`);
+      });
+      if (result.isErr()) {
+        expect(result.error._tag).toBe("db/data-error");
+        expect(transientOf(result.error)).toBe(false);
+      }
+    }
+  });
+
+  test("SQLITE_BUSY → db/lock-timeout, retried by default", async () => {
+    let attempts = 0;
+    const result = await tryDb(() => {
+      attempts += 1;
+      if (attempts < 2)
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+      return "ok";
+    });
+    expect(attempts).toBe(2);
+    expect(result.isOk()).toBe(true);
+  });
+});
+
+describe("mysql2 protocol — ER_* / errno tables", () => {
+  const mysql = (code: string, errno: number, message: string) =>
+    Object.assign(new Error(message), { code, errno, sqlState: "23000" });
+
+  test("1062 duplicate → unique violation", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_DUP_ENTRY", 1062, "Duplicate entry 'a@b.com' for key 'users.email'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
+  });
+
+  test("1452 missing parent → foreign-key violation", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_NO_REFERENCED_ROW_2", 1452, "Cannot add or update a child row");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/foreign-key-violation");
+  });
+
+  test("1048 → not-null violation", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_BAD_NULL_ERROR", 1048, "Column 'email' cannot be null");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/not-null-violation");
+  });
+
+  test("3819 → check violation", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_CHECK_CONSTRAINT_VIOLATED", 3819, "Check constraint violated");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/check-violation");
+  });
+
+  test("1213 deadlock → db/deadlock, transient", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_LOCK_DEADLOCK", 1213, "Deadlock found when trying to get lock");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/deadlock");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("1205 lock wait timeout → db/lock-timeout, transient", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_LOCK_WAIT_TIMEOUT", 1205, "Lock wait timeout exceeded");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("1045 → authentication-failed", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_ACCESS_DENIED_ERROR", 1045, "Access denied for user");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/authentication-failed");
+  });
+
+  test("1064 → sql-syntax-error", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_PARSE_ERROR", 1064, "You have an error in your SQL syntax");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/sql-syntax-error");
+  });
+
+  test("1406 → data-error", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_DATA_TOO_LONG", 1406, "Data too long for column 'name'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/data-error");
+  });
+
+  test("unmapped errno → query-failure", async () => {
+    const result = await tryDb(() => {
+      throw mysql("ER_UNKNOWN_STORAGE_ENGINE", 1286, "Unknown storage engine");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/query-failure");
+  });
+});
+
+describe("mssql protocol — number field", () => {
+  const mssql = (number: number, message: string) => Object.assign(new Error(message), { number });
+
+  test("2627 duplicate key → unique violation", async () => {
+    const result = await tryDb(() => {
+      throw mssql(2627, "Violation of UNIQUE KEY constraint 'users_email_key'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
+  });
+
+  test("547 → foreign-key violation", async () => {
+    const result = await tryDb(() => {
+      throw mssql(547, "The INSERT statement conflicted with the FOREIGN KEY constraint");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/foreign-key-violation");
+  });
+
+  test("547 with CHECK message → check violation (mssql reuses 547)", async () => {
+    const result = await tryDb(() => {
+      throw mssql(547, "The INSERT statement conflicted with the CHECK constraint");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/check-violation");
+  });
+
+  test("515 → not-null violation", async () => {
+    const result = await tryDb(() => {
+      throw mssql(515, "Cannot insert the value NULL into column 'email'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/not-null-violation");
+  });
+
+  test("18456 → authentication-failed", async () => {
+    const result = await tryDb(() => {
+      throw mssql(18456, "Login failed for user 'sa'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/authentication-failed");
+  });
+
+  test("1205 deadlock victim → db/deadlock, transient", async () => {
+    const result = await tryDb(() => {
+      throw mssql(1205, "Transaction (Process ID 52) was deadlocked on lock resources");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/deadlock");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("1222 lock request timeout → db/lock-timeout, transient", async () => {
+    const result = await tryDb(() => {
+      throw mssql(1222, "Lock request time out period exceeded");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/lock-timeout");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("102 → sql-syntax-error", async () => {
+    const result = await tryDb(() => {
+      throw mssql(102, "Incorrect syntax near 'SELEC'");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/sql-syntax-error");
+  });
+
+  test("8115 → data-error", async () => {
+    const result = await tryDb(() => {
+      throw mssql(8115, "Arithmetic overflow error converting expression to data type int");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/data-error");
+  });
+
+  test("unmapped number → query-failure", async () => {
+    const result = await tryDb(() => {
+      throw mssql(4104, "The multi-part identifier could not be bound");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/query-failure");
+  });
+});
+
+describe("prisma protocol — engine P-codes", () => {
+  const prisma = (code: string, message: string, meta?: Record<string, unknown>) =>
+    Object.assign(new Error(message), { code, clientVersion: "6.19.3", meta });
+
+  test("P2002 → unique violation, constraint from meta.target", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P2002", "Unique constraint failed on the fields: (`email`)", {
+        target: ["email"],
+      });
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/unique-violation");
+      expect(constraintOf(result.error)).toBe("email");
+    }
+  });
+
+  test("P2003 → foreign-key violation", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P2003", "Foreign key constraint failed on the field: `userId`");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/foreign-key-violation");
+  });
+
+  test("P2034 write conflict → db/deadlock, transient (Prisma says retry)", async () => {
+    const result = await tryDb(() => {
+      throw prisma(
+        "P2034",
+        "Transaction failed due to a write conflict or a deadlock. Please retry your transaction",
+      );
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/deadlock");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("P2028 interactive tx closed → transaction-aborted", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P2028", "Transaction API error: Transaction already closed");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/transaction-aborted");
+  });
+
+  test("P1001 → connect-failure, transient", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P1001", "Can't reach database server at `localhost`");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/connect-failure");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("P2024 pool timeout / P2037 too-many-connections → connect-failure", async () => {
+    for (const [code, message] of [
+      ["P2024", "Timed out fetching a new connection from the connection pool"],
+      ["P2037", "Too many database connections opened"],
+    ] as const) {
+      const result = await tryDb(() => {
+        throw prisma(code, message);
+      });
+      if (result.isErr()) {
+        expect(result.error._tag).toBe("db/connect-failure");
+        expect(transientOf(result.error)).toBe(true);
+      }
+    }
+  });
+
+  test("P1017 server closed connection → connection-lost, never auto-retried", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P1017", "Server has closed the connection");
+    });
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/connection-lost");
+      expect(transientOf(result.error)).toBe(true);
+    }
+  });
+
+  test("P1000 authentication failed / P1010 access denied", async () => {
+    const authn = await tryDb(() => {
+      throw prisma("P1000", "Authentication failed against database server");
+    });
+    if (authn.isErr()) expect(authn.error._tag).toBe("db/authentication-failed");
+
+    const authz = await tryDb(() => {
+      throw prisma("P1010", "User was denied access on the database");
+    });
+    if (authz.isErr()) expect(authz.error._tag).toBe("db/authorization-failed");
+  });
+
+  test("P2025 record-not-found → query-failure (not a tag; the caller's domain)", async () => {
+    const result = await tryDb(() => {
+      throw prisma("P2025", "An operation failed because it depends on one or more records");
+    });
+    if (result.isErr()) expect(result.error._tag).toBe("db/query-failure");
+  });
+});
+
+describe("transaction-shaped thunks — param-typed tryDb", () => {
+  test("a thunk with a transaction-shaped param disables statement auto-retry", async () => {
+    let attempts = 0;
+    const result = await tryDb((tx: { isTransaction: true }) => {
+      void tx;
+      attempts += 1;
+      throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    });
+    expect(attempts).toBe(1); // inside a transaction: no statement retry
+    if (result.isErr()) expect(result.error._tag).toBe("db/deadlock");
+  });
+
+  test("an explicit retry still wins for in-transaction statements", async () => {
+    let attempts = 0;
+    const result = await tryDb(
+      (tx: { rollback(): never }) => {
+        void tx;
+        attempts += 1;
+        if (attempts < 2) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+        return "ok";
+      },
+      { retry: { times: 3, delayMs: 1, backoff: "constant" } },
+    );
+    expect(attempts).toBe(2);
+    expect(result.isOk()).toBe(true);
+  });
+});
+
+describe("tryTx — whole-transaction retry", () => {
+  test("deadlock retries the whole thunk (fresh transaction each attempt)", async () => {
+    let attempts = 0;
+    const result = await tryTx(() => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+      return "committed";
+    });
+    expect(attempts).toBe(3);
+    expect(result.isOk()).toBe(true);
+  });
+
+  test("ambiguous commit-outcome failures are never auto-retried", async () => {
+    let attempts = 0;
+    const result = await tryTx(() => {
+      attempts += 1;
+      throw Object.assign(new Error("Connection terminated unexpectedly"), {
+        code: "ECONNRESET",
+      });
+    });
+    expect(attempts).toBe(1);
+    if (result.isErr()) {
+      expect(result.error._tag).toBe("db/connection-lost");
+      expect(transientOf(result.error)).toBe(true); // a hint, never auto-retried
+    }
+  });
+
+  test("deterministic errors are never retried", async () => {
+    let attempts = 0;
+    const result = await tryTx(() => {
+      attempts += 1;
+      throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+        code: "SQLITE_CONSTRAINT_UNIQUE",
+      });
+    });
+    expect(attempts).toBe(1);
+    if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
+  });
+
+  test("retryTransient: false disables whole-thunk retry", async () => {
+    let attempts = 0;
+    const result = await tryTx(
+      () => {
+        attempts += 1;
+        throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+      },
+      { retryTransient: false },
+    );
+    expect(attempts).toBe(1);
+    expect(result.isErr()).toBe(true);
+  });
+
+  test("a failure that survived retries carries the attempt count", async () => {
+    const result = await tryTx(() => {
+      throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(isRetriedError(result.error)).toBe(true);
+      if (isRetriedError(result.error)) expect(result.error.retries).toBe(4);
+    }
   });
 });

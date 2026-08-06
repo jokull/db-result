@@ -38,17 +38,43 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
+    },
+    "./pg": {
+      "types": "./dist/drivers/pg.d.mts",
+      "import": "./dist/drivers/pg.mjs",
+      "default": "./dist/drivers/pg.mjs"
+    },
+    "./sqlite": {
+      "types": "./dist/drivers/sqlite.d.mts",
+      "import": "./dist/drivers/sqlite.mjs",
+      "default": "./dist/drivers/sqlite.mjs"
+    },
+    "./d1": {
+      "types": "./dist/drivers/d1.d.mts",
+      "import": "./dist/drivers/d1.mjs",
+      "default": "./dist/drivers/d1.mjs"
+    },
+    "./mysql2": {
+      "types": "./dist/drivers/mysql2.d.mts",
+      "import": "./dist/drivers/mysql2.mjs",
+      "default": "./dist/drivers/mysql2.mjs"
+    },
+    "./mssql": {
+      "types": "./dist/drivers/mssql.d.mts",
+      "import": "./dist/drivers/mssql.mjs",
+      "default": "./dist/drivers/mssql.mjs"
     }
   },
   "scripts": {
     "build": "tsdown",
     "prepublishOnly": "bun run build",
     "test": "bun test ./test.db-result.ts ./test.integration.ts",
+    "test:integration": "bun test ./test.integration.ts",
     "check": "tsc --noEmit",
     "lint": "oxlint .",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
-    "check:exports": "bunx publint && bunx attw --pack",
+    "check:exports": "bunx publint && bunx attw --pack --profile esm-only",
     "check:typescript-minimum": "bun x --yes --package typescript@5.4.5 tsc -p tsconfig.typescript-minimum.json"
   },
   "dependencies": {
@@ -58,15 +84,21 @@
     "@arethetypeswrong/cli": "^0.18.5",
     "@arethetypeswrong/core": "^0.18.5",
     "@libsql/client": "^0.17.4",
+    "@prisma/client": "6.19.3",
     "@types/bun": "latest",
+    "@types/mssql": "^12.3.0",
     "@types/pg": "^8.11.0",
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "1.0.0-rc.4",
+    "kysely": "^0.29.4",
     "miniflare": "^5.20260801.0-alpha",
+    "mssql": "^12.7.0",
+    "mysql2": "^3.23.2",
     "oxfmt": "^0.23.0",
     "oxlint": "^1.38.0",
     "pg": "^8.13.0",
     "postgres": "^3.4.9",
+    "prisma": "6.19.3",
     "publint": "^0.3.23",
     "tsdown": "^0.22.14",
     "typescript": "^5.6.0"
