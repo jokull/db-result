@@ -369,6 +369,7 @@ contract), and the runtime proxy passed pre-execute builders raw
 runtime regression tests).
 
 Fifth-pass review surfaced:
+
 - **P1 FIXED** — the minimum-TS release gate failed: the per-tag guard
   migration left `scripts/typescript-minimum-consumer.mts` calling the
   removed `isUniqueViolation`; now `UniqueViolation.is(e)`.

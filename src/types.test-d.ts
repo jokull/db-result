@@ -459,7 +459,9 @@ const _mBad = mw.insert(mUsers).output().values({ bogus: 1 });
 // via OutputFieldsOf directly):
 import type { OutputFieldsOf } from "./wrap.ts";
 type MFullRow = OutputFieldsOf<{ inserted: true }, typeof mUsers>;
-type _m5 = Assert<Same<MFullRow, { inserted: { id: number; name: string } }> extends true ? true : false>;
+type _m5 = Assert<
+  Same<MFullRow, { inserted: { id: number; name: string } }> extends true ? true : false
+>;
 const mUpdFull = mw.update(mUsers).set({ name: "x" }).output({ inserted: true });
 type _m6 = Assert<Member<Fk, ErrOfPromise<typeof mUpdFull>> extends true ? true : false>;
 

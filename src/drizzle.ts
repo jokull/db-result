@@ -131,25 +131,8 @@ type RelationalQueryOf<Q, E extends DbError, L extends ShapeLedger> = {
 /** Relational reads are SELECTs — the read-shape exclusions apply (respecting
  * the driver's ledger). */
 type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
-  E,
   ShapeExclusions<L, "read">
 >;
-
-/** E-tracked sqlite/D1 terminals — `run` / `all` / `get` (rc.4 types them
- * `any`; the wrapped surface resolves `Result` with the shape union). The
- * members are `never` on builders without the method. `values` stays the
- * insert chain method and is deliberately not a terminal. */
-type SqliteTerminalsOf<B, E extends DbError, L extends ShapeLedger> = {
-  run: B extends { run: (...args: any[]) => any }
-    ? (...args: any[]) => Promise<Result<unknown, ShapeUnion<E, L, B>>>
-    : never;
-  all: B extends { all: (...args: any[]) => any }
-    ? (...args: any[]) => Promise<Result<unknown[], ShapeUnion<E, L, B>>>
-    : never;
-  get: B extends { get: (...args: any[]) => any }
-    ? (...args: any[]) => Promise<Result<unknown, ShapeUnion<E, L, B>>>
-    : never;
-};
 
 /** Wraps a relational query surface: promise-returning methods (`findMany` /
  * `findFirst` / `findOne`) resolve `Result<T, readE>`; `$dynamic`-style
@@ -203,9 +186,7 @@ export type DrizzleTryDb<
   E extends DbError = DbError,
   L extends ShapeLedger = DefaultLedger,
 > = {
-  select: (
-    ...args: Parameters<D["select"]> | []
-  ) => WrappedBuilder<ReturnType<D["select"]>, E, L>;
+  select: (...args: Parameters<D["select"]> | []) => WrappedBuilder<ReturnType<D["select"]>, E, L>;
   selectDistinct: (
     ...args: Parameters<D["selectDistinct"]> | []
   ) => WrappedBuilder<ReturnType<D["selectDistinct"]>, E, L>;

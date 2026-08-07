@@ -147,9 +147,7 @@ export type WrappedBuilder<
   // each chain level.
   [K in keyof B as K extends "execute" | "run" | "all" | "get" | keyof Promise<unknown>
     ? never
-    : K]: B[K] extends (
-    ...args: infer A
-  ) => infer R
+    : K]: B[K] extends (...args: infer A) => infer R
     ? K extends "output"
       ? // mssql's `output` — the pre-values insert builder's output() returns
         // an Omit'd builder WITHOUT `execute`, so the generic chain arm
@@ -175,7 +173,8 @@ export type WrappedBuilder<
             // inference (drizzle's per-call fields projection can't be
             // reconstructed structurally — tracked as a follow-up).
             ((fields: any) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>) &
-              (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable> & SqliteTerminalsOf<B, E, L>)
+              (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable> &
+                SqliteTerminalsOf<B, E, L>)
           : K extends "values"
             ? TTable extends { $inferInsert: infer I }
               ? // re-type from the threaded table — the mapped `infer V`
@@ -189,11 +188,14 @@ export type WrappedBuilder<
                 (
                   value: InsertValueOf<I> | InsertValueOf<I>[],
                 ) => B extends { _: { result: infer Rows } }
-                  ? WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L> & { _: { result: Rows } }
+                  ? WrappedBuilder<R, E, L, TTable> &
+                      SqliteTerminalsOf<R, E, L> & { _: { result: Rows } }
                   : WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
               : A extends [infer V]
                 ? V extends readonly unknown[]
-                  ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
+                  ? (
+                      value: V | V[number],
+                    ) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
                   : (...args: A) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
                 : (...args: A) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
             : K extends "set"
@@ -201,7 +203,9 @@ export type WrappedBuilder<
                 ? // same re-typing for the update set — the constraint
                   // instantiation accepts invalid update objects; per-column
                   // expressions AND column references stay allowed
-                  (update: Partial<SetValueOf<I>>) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
+                  (
+                    update: Partial<SetValueOf<I>>,
+                  ) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
                 : (...args: A) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
               : (...args: A) => WrappedBuilder<R, E, L, TTable> & SqliteTerminalsOf<R, E, L>
         : B[K]
