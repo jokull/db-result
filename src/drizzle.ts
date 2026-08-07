@@ -78,6 +78,38 @@ type TransactionOf<D> = D extends {
   ? TX & AnyDrizzleDb
   : never;
 
+/** Drizzle's own branded rejection for sync transactions (`DrizzleTypeError`
+ * is internal to drizzle-orm — mirrored here so no import is needed). An
+ * unconstructable interface: an async callback's `Promise` can never be
+ * assignable to it, so the conditional's mismatch is what the caller sees. */
+interface SyncTxError<T extends string> {
+  readonly __typeError: T;
+}
+
+/** The wrapped transaction's callback — mirrors the SOURCE db's async-ness
+ * (codex #8, P1). Async backends (pg, mysql, D1) keep the `PromiseLike`
+ * surface; SYNC backends (bun:sqlite, better-sqlite3) force a synchronous
+ * callback with drizzle's own reject-async mechanic: the source's callback
+ * return can never be a `PromiseLike`, so a promise-returning callback fails
+ * the check. The wrapped statements are Promise-returning, so nothing real
+ * can run synchronously inside a wrapped tx — it is effectively rejected on
+ * sync drivers, where the driver would commit before the statements resolve
+ * (a mid-tx failure leaves earlier writes committed). */
+type TransactionCb<
+  D extends AnyDrizzleDb,
+  E extends DbError,
+  L extends ShapeLedger,
+  T,
+> = D["transaction"] extends (transaction: (tx: any) => infer R, ...rest: any[]) => any
+  ? R extends PromiseLike<unknown>
+    ? (tx: DrizzleTryDb<TransactionOf<D>, E, L>) => PromiseLike<T> | T
+    : (
+        tx: DrizzleTryDb<TransactionOf<D>, E, L>,
+      ) => T extends PromiseLike<unknown>
+        ? SyncTxError<"Sync drivers can't run async callbacks in transactions — the driver commits before the statements resolve. Use the raw db's transaction on sync drivers.">
+        : T
+  : (tx: DrizzleTryDb<TransactionOf<D>, E, L>) => PromiseLike<T> | T;
+
 /** The db's relational query surface, resolved BEFORE the mapped wrap — a
  * bare `D["query"]` indexed access inside the object type stays deferred
  * under the native TypeScript compiler (tsgo), which defeats the
@@ -158,8 +190,15 @@ export type DrizzleTryDb<
   selectDistinct: (
     ...args: Parameters<D["selectDistinct"]> | []
   ) => WrappedBuilder<ReturnType<D["selectDistinct"]>, E, L>;
-  selectDistinctOn: D["selectDistinctOn"] extends (...args: infer A) => infer B
-    ? (...args: A) => WrappedBuilder<B, E, L>
+  selectDistinctOn: D["selectDistinctOn"] extends (on: infer On, fields?: infer F) => infer B
+    ? // pg overloads `selectDistinctOn` (1-arg select-all | 2-arg fields);
+      // the mapped `infer A` capture keeps only the LAST overload, so the
+      // valid 1-arg form errored "Expected 2 arguments". `fields` optional
+      // restores both call forms; the wrapped chain degrades the projection
+      // rows to structural arrays either way (documented sharp edge), so the
+      // two overloads share the captured builder — narrowing (read shape) is
+      // what must survive (codex #10). No zero-arg form.
+      (on: On, fields?: F) => WrappedBuilder<B, E, L>
     : never;
   insert: <TTable extends { $inferSelect: unknown }>(
     table: TTable,
@@ -171,7 +210,7 @@ export type DrizzleTryDb<
     table: TTable,
   ) => WrappedBuilder<ReturnType<D["delete"]>, E, L, TTable>;
   transaction<T>(
-    cb: (tx: DrizzleTryDb<TransactionOf<D>, E, L>) => PromiseLike<T> | T,
+    cb: TransactionCb<D, E, L, T>,
     ...rest: D["transaction"] extends (cb: any, ...rest2: infer R) => any ? R : never[]
   ): Promise<Result<T, E>>;
   execute: D["execute"] extends (...args: infer A) => infer R
@@ -180,7 +219,22 @@ export type DrizzleTryDb<
   with: D["with"] extends (...args: infer A) => infer W
     ? (...args: A) => {
         [K in keyof W]: W[K] extends (...args: infer WA) => infer WB
-          ? (...args: WA) => WrappedBuilder<WB, E, L>
+          ? K extends "insert" | "update" | "delete"
+            ? // the with-factories are generic over the table like the
+              // top-level methods — re-declare the generic so the chain's
+              // values/set re-type from the CALLED table (the mapped
+              // capture instantiates it at the constraint — `values` came
+              // back `never`; codex #11)
+              <TTable extends { $inferSelect: unknown }>(
+                table: TTable,
+              ) => WrappedBuilder<WB, E, L, TTable>
+            : K extends "select" | "selectDistinct"
+              ? // both are overloaded (zero-arg select-all | fields) — the
+                // mapped capture keeps only the fields form, so the valid
+                // zero-arg call errored; `| []` restores it (same sharp
+                // edge as the top-level select: rows degrade structurally)
+                (...args: WA | []) => WrappedBuilder<WB, E, L>
+              : (...args: WA) => WrappedBuilder<WB, E, L>
           : W[K];
       }
     : never;
@@ -266,18 +320,41 @@ const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unk
         return (...args: unknown[]) => {
           const cb = args[0] as (tx: unknown) => unknown;
           const txConfig = args[1] as { [k: string]: unknown } | undefined;
-          return tryTx(
-            () =>
-              (
-                target as {
-                  transaction: (
-                    cb: (tx: unknown) => unknown,
-                    c?: { [k: string]: unknown },
-                  ) => PromiseLike<unknown>;
-                }
-              ).transaction((tx) => cb(wrapDrizzle(tx, config)), txConfig),
-            config,
-          );
+          let cbResult: unknown;
+          let cbRan = false;
+          const wrappedCb = (tx: unknown) => {
+            cbRan = true;
+            cbResult = cb(wrapDrizzle(tx, config));
+            return cbResult;
+          };
+          return tryTx(() => {
+            cbRan = false;
+            const out = (
+              target as {
+                transaction: (
+                  cb: (tx: unknown) => unknown,
+                  c?: { [k: string]: unknown },
+                ) => unknown;
+              }
+            ).transaction(wrappedCb, txConfig);
+            // Sync drivers (bun:sqlite, better-sqlite3) return the callback's
+            // OWN value unwrapped; async drivers always return a fresh
+            // promise. A promise callback coming back BY IDENTITY means the
+            // driver committed before the wrapped statements resolved — the
+            // writes already escaped the transaction (codex #8).
+            if (
+              cbRan &&
+              cbResult !== null &&
+              typeof cbResult === "object" &&
+              typeof (cbResult as { then?: unknown }).then === "function" &&
+              out === cbResult
+            ) {
+              throw new Error(
+                "db-result: sync transaction backends can't run async callbacks — the driver commits before the statements resolve. Use the raw db's transaction on sync drivers.",
+              );
+            }
+            return out;
+          }, config);
         };
       }
       if (key === "execute") {

@@ -8,14 +8,27 @@
  */
 import type { DbError, ShapeLedger, ShapeUnion } from "./db-result.js";
 import type { Result } from "better-result";
+// Type-only: drizzle's SQL expression + placeholder types, for the write
+// arms (values/set accept expression-valued columns — codex #9). Erased at
+// build time; the runtime bundle has no drizzle dependency.
+import type { Placeholder, SQL } from "drizzle-orm";
+import type { Column, GetColumnData } from "drizzle-orm/column";
 
 /** The result type a builder produces, from its own `_` slot (Drizzle's
- * declared result) when present, falling back to its `execute` return. */
+ * declared result) when present, falling back to its `execute` return.
+ * MSSQL builders carry `output` (not `result`) in the slot — the output
+ * clause's rows are the executable result (codex #12). */
 export type ExecR<B> = B extends { _: { result: infer R } }
   ? R
-  : B extends { execute(...args: any[]): PromiseLike<infer R> }
-    ? R
-    : never;
+  : B extends { _: { output: infer O } }
+    ? O extends undefined
+      ? B extends { execute(...args: any[]): PromiseLike<infer R2> }
+        ? R2
+        : never
+      : O[]
+    : B extends { execute(...args: any[]): PromiseLike<infer R> }
+      ? R
+      : never;
 
 /** Drizzle's zero-arg `returning()` — all columns — reconstructed
  * structurally. The mapped chain sees only the LAST overload of the
@@ -38,6 +51,43 @@ export type ReturningAll<B, TTable> = TTable extends { $inferSelect: infer S }
     }
   : B;
 
+/** Drizzle's write-object shape: per-column values may be SQL expressions
+ * or placeholders (mirrors drizzle's own `SQLiteInsertValue` / update-set
+ * shape — the strict `$inferInsert` re-type in the mapped chain rejected
+ * expression-valued writes; codex #9). */
+export type InsertValueOf<I> = { [K in keyof I]: I[K] | SQL | Placeholder };
+
+/** A selected field's row data type — mirrors drizzle's `SelectResultField`
+ * for the shapes the mapped chain sees (columns, SQL expressions, nested
+ * records), so the `output`/`returning`-fields arms rebuild the result from
+ * the CALL's fields type instead of drizzle's per-call inference (which
+ * degrades through the mapped type under the native compiler; codex #12). */
+type FieldDataOf<F> =
+  F extends Column<any>
+    ? GetColumnData<F>
+    : F extends { _: { type: infer T } }
+      ? T
+      : F extends Record<string, any>
+        ? { [K in keyof F]: FieldDataOf<F[K]> }
+        : unknown;
+
+/** The row shape a fields-projection produces: one data type per field. */
+export type OutputFieldsOf<F> = { [K in keyof F]: FieldDataOf<F[K]> };
+
+/** The pre-values mssql builder after `output(fields)`: the `_` slot is
+ * rebuilt with the projected rows (like `ReturningAll`), so the chain's
+ * `values` arm can propagate them into the executable result. */
+type OutputAll<B, TTable, TFields> =
+  TFields extends Record<string, unknown>
+    ? Omit<B, "_"> & {
+        _: (B extends { _: infer Slot } ? Omit<Slot, "result" | "output" | "returning"> : {}) & {
+          table: TTable;
+          output: OutputFieldsOf<TFields>;
+          result: OutputFieldsOf<TFields>[];
+        };
+      }
+    : B;
+
 /** A builder whose `execute`/`then`/`catch`/`finally` resolve to
  * `Result<T, E>` and whose chain methods keep returning E-tracked builders.
  * The union narrows per builder shape via the ledger — exactly like
@@ -54,39 +104,61 @@ export type WrappedBuilder<
   [K in keyof B as K extends "execute" | keyof Promise<unknown> ? never : K]: B[K] extends (
     ...args: infer A
   ) => infer R
-    ? R extends { execute: (...args: any[]) => PromiseLike<unknown> }
-      ? K extends "returning"
-        ? // Drizzle overloads `returning()`: zero-arg (all columns) and
-          // `returning(fields)`. The mapped conditional infers `R`/`A` from
-          // the overloaded method and the inference is unusable: `A` comes
-          // back `[]` (matching zero-arg calls) and `R` carries polymorphic
-          // `this` unresolved, so `ExecR` falls through to the execute
-          // branch. The zero-arg arm therefore reconstructs from the
-          // CURRENT builder `B` (concrete): all columns from B's table via
-          // `ReturningAll`. The fields arm keeps the wrapped-but-degraded
-          // inference (drizzle's per-call fields projection can't be
-          // reconstructed structurally — tracked as a follow-up).
-          ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
-            (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable>)
-        : K extends "values"
-          ? TTable extends { $inferInsert: infer I }
-            ? // re-type from the threaded table — the mapped `infer V`
-              // instantiates drizzle's values param at its constraint, which
-              // accepts invalid columns
-              (value: I | I[]) => WrappedBuilder<R, E, L, TTable>
-            : A extends [infer V]
-              ? V extends readonly unknown[]
-                ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+    ? K extends "output"
+      ? // mssql's `output` — the pre-values insert builder's output() returns
+        // an Omit'd builder WITHOUT `execute`, so the generic chain arm
+        // below would pass it through raw and the E-track dies there; the
+        // fields overload's result is drizzle's per-call `SelectResultFields`
+        // which never instantiates through the mapped type. Re-declare the
+        // generic and rebuild the result from the CALL's fields type;
+        // delete/update bases overload it the same way (codex #12).
+        (<TFields extends Record<string, unknown>>(
+          fields: TFields,
+        ) => WrappedBuilder<OutputAll<B, TTable, TFields>, E, L, TTable>) &
+          (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable>)
+      : R extends { execute: (...args: any[]) => PromiseLike<unknown> }
+        ? K extends "returning"
+          ? // Drizzle overloads `returning()`: zero-arg (all columns) and
+            // `returning(fields)`. The mapped conditional infers `R`/`A` from
+            // the overloaded method and the inference is unusable: `A` comes
+            // back `[]` (matching zero-arg calls) and `R` carries polymorphic
+            // `this` unresolved, so `ExecR` falls through to the execute
+            // branch. The zero-arg arm therefore reconstructs from the
+            // CURRENT builder `B` (concrete): all columns from B's table via
+            // `ReturningAll`. The fields arm keeps the wrapped-but-degraded
+            // inference (drizzle's per-call fields projection can't be
+            // reconstructed structurally — tracked as a follow-up).
+            ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
+              (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable>)
+          : K extends "values"
+            ? TTable extends { $inferInsert: infer I }
+              ? // re-type from the threaded table — the mapped `infer V`
+                // instantiates drizzle's values param at its constraint, which
+                // accepts invalid columns; per-column values keep the
+                // expression form (`SQL` / `Placeholder`) drizzle allows.
+                // When the pre-values builder already carries the projected
+                // rows in its `_` slot (mssql `output`), the values result
+                // keeps them — drizzle's own chain loses them (the raw
+                // values result's slot has `output: undefined`)
+                (
+                  value: InsertValueOf<I> | InsertValueOf<I>[],
+                ) => B extends { _: { result: infer Rows } }
+                  ? WrappedBuilder<R, E, L, TTable> & { _: { result: Rows } }
+                  : WrappedBuilder<R, E, L, TTable>
+              : A extends [infer V]
+                ? V extends readonly unknown[]
+                  ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+                  : (...args: A) => WrappedBuilder<R, E, L, TTable>
+                : (...args: A) => WrappedBuilder<R, E, L, TTable>
+            : K extends "set"
+              ? TTable extends { $inferInsert: infer I }
+                ? // same re-typing for the update set — the constraint
+                  // instantiation accepts invalid update objects; per-column
+                  // expressions stay allowed
+                  (update: Partial<InsertValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
                 : (...args: A) => WrappedBuilder<R, E, L, TTable>
               : (...args: A) => WrappedBuilder<R, E, L, TTable>
-          : K extends "set"
-            ? TTable extends { $inferInsert: infer I }
-              ? // same re-typing for the update set — the constraint
-                // instantiation accepts invalid update objects
-                (update: Partial<I>) => WrappedBuilder<R, E, L, TTable>
-              : (...args: A) => WrappedBuilder<R, E, L, TTable>
-            : (...args: A) => WrappedBuilder<R, E, L, TTable>
-      : B[K]
+        : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {
     execute: (...args: any[]) => Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>>;

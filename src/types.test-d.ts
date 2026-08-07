@@ -295,6 +295,53 @@ const wsel0 = wrapped.select().from(users);
 type WRow0 = Awaited<ReturnType<typeof wsel0.execute>> extends Result<infer V, unknown> ? V : never;
 type _w4 = Assert<WRow0 extends unknown[] ? true : false>;
 
+// codex #10: selectDistinctOn keeps BOTH pg overloads — the 1-arg (select
+// all) and the 2-arg (fields projection) — with no zero-arg form. The
+// pre-`.from()` builder has no select-clause evidence, so the shape is read
+// on the executed chain (same sharp edge as `wrapped.select(...)`).
+const wsd1 = wrapped.selectDistinctOn([users.id]).from(users);
+type _wsd0 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wsd1.execute>>> extends true ? true : false
+>;
+type _wsd1 = Assert<
+  Member<TxAborted, ErrOf<ReturnType<typeof wsd1.execute>>> extends true ? true : false
+>;
+type WSD1Row =
+  Awaited<ReturnType<typeof wsd1.execute>> extends Result<infer V, unknown> ? V : never;
+type _wsd2 = Assert<WSD1Row extends unknown[] ? true : false>;
+const wsd2 = wrapped.selectDistinctOn([users.id], { id: users.id, email: users.email }).from(users);
+type _wsd3 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wsd2.execute>>> extends true ? true : false
+>;
+// @ts-expect-error — selectDistinctOn has no zero-arg form
+const _wsdBad = wrapped.selectDistinctOn();
+
+// codex #11: the with surface re-expresses the factories — zero-arg
+// `.select()` works, and `.insert(table).values(...)` re-types from the
+// called table (the mapped capture instantiated the table generic at its
+// constraint — values came back `never`).
+const cte = db.$with("recent").as(db.select().from(users));
+const ww = wrapped.with(cte);
+const wwSel = ww.select().from(users);
+type _ww0 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wwSel.execute>>> extends true ? true : false
+>;
+const wwSel2 = ww.select({ id: users.id }).from(users);
+type _ww1 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wwSel2.execute>>> extends true ? true : false
+>;
+const wwIns = ww.insert(users).values({ id: 1, email: "a" });
+type _ww2 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof wwIns.execute>>> extends true ? true : false
+>;
+// @ts-expect-error — bogus values column rejected in the with insert too
+const _wwBad = ww.insert(users).values({ bogus: 1 });
+const wwDel = ww.delete(users);
+type _ww3 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wwDel.execute>>> extends true ? true : false
+>;
+type _ww4 = Assert<Member<Fk, ErrOf<ReturnType<typeof wwDel.execute>>> extends true ? true : false>;
+
 // awaiting the builder directly resolves the Result (then path).
 type _w5 = Assert<Awaited<typeof wsel> extends Result<unknown, unknown> ? true : false>;
 
@@ -327,6 +374,40 @@ const wtxInner = wrapped.transaction(async (tx) => {
 });
 void wtxInner;
 
+// ─── codex #8: sync backends reject async callbacks in wrapped transactions
+
+// A sync driver's transaction callback return is never a PromiseLike, so the
+// wrapped callback is forced synchronous — the mirror rejects async callbacks
+// with drizzle's own mechanic (the branded SyncTxError). A sync no-op
+// callback stays valid, and the whole-tx Result shape is unchanged.
+declare const syncDbs: {
+  select: (...args: any[]) => any;
+  selectDistinct: (...args: any[]) => any;
+  insert: (table: any) => any;
+  update: (table: any) => any;
+  delete: (table: any) => any;
+  transaction<T>(cb: (tx: { tag: "tx" }) => T, config?: { behavior: "defer" }): T;
+};
+const wrappedSync = drizzleTryDb(syncDbs);
+// @ts-expect-error — sync drivers can't run async callbacks (the driver
+// commits before the wrapped statements resolve — atomicity would be lost)
+const _wsyncBad = wrappedSync.transaction(async (tx) => {
+  void tx;
+  return "committed";
+});
+// a synchronous no-op callback is still valid and keeps the Result shape:
+const wsyncOk = wrappedSync.transaction(() => "committed" as const);
+type _wsync0 = Assert<Same<ErrOf<typeof wsyncOk>, DbError> extends true ? true : false>;
+type _wsync1 = Assert<
+  Same<
+    Awaited<typeof wsyncOk> extends Result<infer V, unknown> ? V : never,
+    "committed"
+  > extends true
+    ? true
+    : false
+>;
+// async backends keep the PromiseLike surface (covered above by `wtx`).
+
 // raw execute: full union.
 const wraw = wrapped.execute(drizzleSql`select 1`);
 type _w12 = Assert<Same<ErrOf<typeof wraw>, DbError> extends true ? true : false>;
@@ -338,6 +419,40 @@ type _w14 = Assert<Same<typeof wrapped.$with, typeof db.$with> extends true ? tr
 // protocol-tight E is available via the explicit generic.
 import type { DrizzleTryDb } from "./drizzle.ts";
 type _w15 = Assert<DrizzleTryDb<typeof db, SqliteDbError> extends unknown ? true : false>;
+
+// ─── codex #12: mssql `output` — result tracking through the wrapped chain ──
+
+// The pre-values insert builder's output() returns a builder WITHOUT
+// `execute`, so the mapped chain would pass it through raw and the E-track
+// died there (the execute resolved `Result<never, …>`). The `output` arm
+// wraps both forms and reconstructs the zero-arg (all-columns) result from
+// the threaded table — mirroring `returning`.
+import { mssqlTable as mTable, int as mInt, varchar as mVarChar } from "drizzle-orm/mssql-core";
+import type { MsSqlDatabase } from "drizzle-orm/mssql-core";
+
+const mUsers = mTable("m_users", {
+  id: mInt("id").identity().primaryKey(),
+  name: mVarChar("name", { length: 50 }).notNull(),
+});
+declare const mdb: MsSqlDatabase<any, any, {}>;
+const mw = drizzleTryDb(mdb);
+const mIns = mw.insert(mUsers).output().values({ name: "a" });
+type MInsOk = OkOfPromise<typeof mIns>;
+type _m0 = Assert<Same<MInsOk, { id: number; name: string }[]> extends true ? true : false>;
+type _m1 = Assert<Member<Unique, ErrOfPromise<typeof mIns>> extends true ? true : false>;
+const mInsF = mw.insert(mUsers).output({ id: mUsers.id }).values({ name: "a" });
+type MInsFOk = OkOfPromise<typeof mInsF>;
+type _m2 = Assert<Same<MInsFOk, { id: number }[]> extends true ? true : false>;
+// the delete base overloads output the same way (zero-arg | fields):
+const mDel = mw
+  .delete(mUsers)
+  .output()
+  .where(drizzleSql`id = 1`);
+type MDelOk = OkOfPromise<typeof mDel>;
+type _m3 = Assert<Same<MDelOk, { id: number; name: string }[]> extends true ? true : false>;
+type _m4 = Assert<Member<Fk, ErrOfPromise<typeof mDel>> extends true ? true : false>;
+// @ts-expect-error — bogus values column rejected in the output insert too
+const _mBad = mw.insert(mUsers).output().values({ bogus: 1 });
 
 // ─── kyselyTryDb — the E-tracked wrapper ────────────────────────────────────
 
@@ -530,6 +645,29 @@ type _rel0 = Assert<
 const _sInsBad = wrappedSqlite.insert(rPosts).values({ bogus: 1 });
 // @ts-expect-error — bogus set column rejected
 const _sUpdBad = wrappedSqlite.update(rPosts).set({ bogus: 1 });
+// codex #9: expression-valued writes stay allowed — per-column SQL /
+// placeholder values union into the write object like drizzle's own
+// `SQLiteInsertValue` (the strict $inferInsert re-type must not lose them).
+const sInsExpr = wrappedSqlite.insert(rPosts).values({ slug: drizzleSql`lower('A')`, title: "b" });
+type _relExpr0 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof sInsExpr.execute>>> extends true ? true : false
+>;
+const sUpdExpr = wrappedSqlite
+  .update(rPosts)
+  .set({ title: drizzleSql`'c'` })
+  .where(undefined)
+  .returning();
+type _relExpr1 = Assert<
+  Same<OkOfPromise<typeof sUpdExpr>, { slug: string; title: string | null }[]> extends true
+    ? true
+    : false
+>;
+const sInsPh = wrappedSqlite
+  .insert(rPosts)
+  .values({ slug: drizzleSql.placeholder("s"), title: "b" });
+type _relExpr2 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof sInsPh.execute>>> extends true ? true : false
+>;
 // ISSUES.md #1: wrapped chains must keep drizzle's precise rows through
 // zero-arg `.returning()` — not the degraded Record<string, unknown>[].
 const sInsRet = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" }).returning();
