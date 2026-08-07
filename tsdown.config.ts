@@ -8,6 +8,7 @@ export default defineConfig({
     "src/drivers/d1.ts",
     "src/drivers/mysql2.ts",
     "src/drivers/mssql.ts",
+    "src/drizzle.ts",
   ],
   format: ["esm"],
   dts: {

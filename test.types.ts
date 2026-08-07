@@ -258,4 +258,71 @@ type _s3 = Assert<Absent<TxAborted, SqliteReadErr>>;
 const sqliteZeroArg = sqliteTryDb(async () => 1);
 type _s4 = Assert<Same<ErrOf<typeof sqliteZeroArg>, SqliteDbError>>;
 
+// ─── drizzleTryDb — the E-tracked wrapper ───────────────────────────────────
+
+import { drizzleTryDb } from "./src/drizzle.ts";
+
+const wrapped = drizzleTryDb(db);
+
+// select chain (explicit selection): read shape — constraints gone,
+// transaction-aborted stays. Rows degrade to structurally-typed arrays
+// (documented sharp edge: the mapped chain can't preserve Drizzle's
+// generics — the union narrowing is what survives).
+const wsel = wrapped.select({ id: users.id, email: users.email }).from(users);
+type WSelErr = ErrOf<ReturnType<typeof wsel.execute>>;
+type _w1 = Assert<Absent<Unique, WSelErr> extends true ? true : false>;
+type _w2 = Assert<Member<TxAborted, WSelErr> extends true ? true : false>;
+type WRow = Awaited<ReturnType<typeof wsel.execute>> extends Result<infer V, unknown> ? V : never;
+type _w3 = Assert<WRow extends unknown[] ? true : false>;
+
+// zero-arg select: the mapped chain degrades rows to structurally-typed
+// arrays (documented sharp edge) — the union narrowing still applies.
+const wsel0 = wrapped.select().from(users);
+type WRow0 = Awaited<ReturnType<typeof wsel0.execute>> extends Result<infer V, unknown> ? V : never;
+type _w4 = Assert<WRow0 extends unknown[] ? true : false>;
+
+// awaiting the builder directly resolves the Result (then path).
+type _w5 = Assert<Awaited<typeof wsel> extends Result<unknown, unknown> ? true : false>;
+
+// insert: write shape — constraints stay.
+const wins = wrapped.insert(users).values({ id: 1, email: "a" });
+type _w6 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof wins.execute>>> extends true ? true : false
+>;
+type _w7 = Assert<
+  Member<TxAborted, ErrOf<ReturnType<typeof wins.execute>>> extends true ? true : false
+>;
+
+// delete (bare): delete shape — FK stays, unique gone.
+const wdel = wrapped.delete(users);
+type WDelErr = ErrOf<ReturnType<typeof wdel.execute>>;
+type _w8 = Assert<Absent<Unique, WDelErr> extends true ? true : false>;
+type _w9 = Assert<Member<Fk, WDelErr> extends true ? true : false>;
+
+// transaction: whole-tx Result, full union.
+const wtx = wrapped.transaction(async (_tx) => "committed");
+type _w10 = Assert<Same<ErrOf<typeof wtx>, DbError> extends true ? true : false>;
+/** The error union of a Result: `Result<T, E>` → `E`. */
+type ErrOfResult<R> = R extends Result<unknown, infer E> ? E : never;
+
+// statements inside the tx callback are E-tracked too:
+const wtxInner = wrapped.transaction(async (tx) => {
+  const r = await tx.insert(users).values({ id: 1, email: "a" }).execute();
+  type _w11 = Assert<Member<Unique, ErrOfResult<typeof r>> extends true ? true : false>;
+  return r;
+});
+void wtxInner;
+
+// raw execute: full union.
+const wraw = wrapped.execute(drizzleSql`select 1`);
+type _w12 = Assert<Same<ErrOf<typeof wraw>, DbError> extends true ? true : false>;
+
+// pass-through members stay raw.
+type _w13 = Assert<Same<typeof wrapped.query, typeof db.query> extends true ? true : false>;
+type _w14 = Assert<Same<typeof wrapped.$with, typeof db.$with> extends true ? true : false>;
+
+// protocol-tight E is available via the explicit generic.
+import type { DrizzleTryDb } from "./src/drizzle.ts";
+type _w15 = Assert<DrizzleTryDb<typeof db, SqliteDbError> extends unknown ? true : false>;
+
 export {};

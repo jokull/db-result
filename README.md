@@ -146,6 +146,32 @@ affected — it stays honest for every shape, including the reads-that-write
 footgun. Full lattice, footguns, and per-driver ledgers:
 [shapes](./skills/db-result/references/shapes.md).
 
+## Commit to Result shapes: `drizzleTryDb`
+
+If you want the whole codebase on Result shapes — no `tryDb` at every call site,
+no thunks — wrap the drizzle client once:
+
+```ts
+import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzleTryDb } from "db-result/drizzle";
+
+const db = drizzleTryDb(drizzle({ connection, schema }));
+
+const outcome = await db.select({ id: users.id }).from(users).execute();
+//            ^? Promise<Result<…, readUnion>> — unwrap with isOk()/isErr()
+if (outcome.isErr()) return outcome; // the fold terminal lists what's left
+const [user] = outcome.value;
+```
+
+One config, everywhere: builders re-execute on retry, `transaction` restarts
+whole, raw `execute` re-invokes. The wrapper owns the re-invocation, so there
+are no thunks at the call site. Two honest caveats: the wrapped chain types are
+structural, not literal — Drizzle's builder generics can't survive the type
+mapping, so rows degrade to `Record<string, any>`-shaped arrays while the union
+narrowing stays exact (drop to `tryDb(builder)` where row literals matter), and
+`query`/`$with` pass through raw. Tighten the union per protocol with the
+explicit generic: `drizzleTryDb<typeof db, SqliteDbError>(db)`.
+
 ## Drivers
 
 One package, subpath entry points per protocol: `db-result/pg`, `/sqlite`, `/d1`,

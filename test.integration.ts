@@ -14,6 +14,14 @@ import pg from "pg";
 import mysql from "mysql2/promise";
 import mssql from "mssql";
 import { tryDb } from "./src/db-result.ts";
+import { pgTable, text, integer } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzleTryDb } from "./src/drizzle.ts";
+
+const wrapUsers = pgTable("wrap_users", {
+  id: integer("id").primaryKey(),
+  email: text("email"),
+});
 
 // ─── PostgreSQL ──────────────────────────────────────────────────────────────
 
@@ -128,6 +136,76 @@ describePg("real node-postgres", () => {
     expect(auth.isErr()).toBe(true);
     if (auth.isErr()) expect(auth.error._tag).toBe("db/authentication-failed");
     await badPool.end();
+  });
+});
+
+// ─── drizzleTryDb — the E-tracked wrapper ────────────────────────────────────
+
+describePg("drizzleTryDb — the E-tracked wrapper", () => {
+  test("wrapped select/insert execute to Result with retry and narrowing", async () => {
+    const pool = new pg.Pool({ connectionString: process.env.PGTEST_DSN });
+    const client = await pool.connect();
+    try {
+      await client.query("DROP TABLE IF EXISTS wrap_users");
+      await client.query(`
+        CREATE TABLE wrap_users (
+          id SERIAL PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE
+        )`);
+      const db = drizzleTryDb(
+        drizzle({ connection: { connectionString: process.env.PGTEST_DSN } }),
+      );
+
+      // insert through the wrapped builder — Result out, unique violation in
+      const ins = await db.insert(wrapUsers).values({ id: 1, email: "a@b.c" }).execute();
+      expect(ins.isOk()).toBe(true);
+      const dupe = await db.insert(wrapUsers).values({ id: 2, email: "a@b.c" }).execute();
+      expect(dupe.isErr()).toBe(true);
+      if (dupe.isErr()) expect(dupe.error._tag).toBe("db/unique-violation");
+
+      // select through the wrapped chain — Result out
+      const rows = await db.select({ id: wrapUsers.id, email: wrapUsers.email }).from(wrapUsers);
+      expect(rows.isOk()).toBe(true);
+      if (rows.isOk()) expect(rows.value.length).toBe(1);
+
+      // awaiting the builder directly also resolves a Result
+      const awaited = await db.select({ id: wrapUsers.id }).from(wrapUsers);
+      expect(awaited.isOk()).toBe(true);
+
+      // whole transaction through the wrapper — Result out, no stray rollback
+      const tx = await db.transaction(async (tx) => {
+        const r = await tx.insert(wrapUsers).values({ id: 3, email: "b@c.d" }).execute();
+        if (r.isErr()) return r;
+        return r.value;
+      });
+      expect(tx.isOk()).toBe(true);
+      const count = await client.query("SELECT count(*)::int AS n FROM wrap_users");
+      expect(count.rows[0].n).toBe(2); // insert + tx insert
+
+      // a transient failure retries through the wrapper (re-executes the builder)
+      let attempts = 0;
+      const fake = drizzleTryDb({
+        select: () => ({
+          from: () => ({
+            execute: () => {
+              attempts += 1;
+              if (attempts < 2) {
+                return Promise.reject(
+                  Object.assign(new Error("deadlock detected"), { code: "40P01" }),
+                );
+              }
+              return Promise.resolve([{ id: 1 }]);
+            },
+          }),
+        }),
+      } as never);
+      const retried = await (fake as any).select().from({}).execute();
+      expect(attempts).toBe(2);
+      expect(retried.isOk()).toBe(true);
+    } finally {
+      await client.release();
+      await pool.end();
+    }
   });
 });
 
