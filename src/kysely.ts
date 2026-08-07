@@ -156,11 +156,14 @@ type NoResultErrorFor<O> = [O] extends [never | undefined]
     : O extends (node: QueryNode) => infer R
       ? R
       : O extends { errorConstructor?: infer C }
-        ? ErrorFromCtor<NonNullable<C>>
+        ? ErrorFromCtor<NonNullable<C>> | (undefined extends C ? NoResultError : never)
         : NoResultError;
 
 /** E-tracked `executeTakeFirstOrThrow`: no row resolves `Err(NoResultError)`
- * — or the caller's `errorConstructor` — instead of throwing. */
+ * — or the caller's `errorConstructor` — instead of throwing. Mutation
+ * builders (non-returning insert/update/delete/merge) can never yield the
+ * no-result error — their terminals always produce the mutation result — so
+ * the union omits it for them. */
 type TakeFirstOrThrowFn<B, E extends DbError, L extends ShapeLedger> = <
   O2 extends
     | ExecuteTakeFirstOrThrowOptions
@@ -168,7 +171,14 @@ type TakeFirstOrThrowFn<B, E extends DbError, L extends ShapeLedger> = <
     | undefined = undefined,
 >(
   options?: O2,
-) => Promise<Result<SingleResultOf<B>, ShapeUnion<E, L, B> | NoResultErrorFor<O2>>>;
+) => Promise<
+  Result<
+    SingleResultOf<B>,
+    SingleResultOf<B> extends InsertResult | UpdateResult | DeleteResult | MergeResult
+      ? ShapeUnion<E, L, B>
+      : ShapeUnion<E, L, B> | NoResultErrorFor<O2>
+  >
+>;
 
 /** Re-adds the overloaded chain forms the mapped type drops, per builder
  * family. Returns `WrappedKyselyBuilder<B>` (self) — the shape is unchanged

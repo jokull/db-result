@@ -69,12 +69,23 @@ export type WrappedBuilder<
           ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
             (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable>)
         : K extends "values"
-          ? A extends [infer V]
-            ? V extends readonly unknown[]
-              ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+          ? TTable extends { $inferInsert: infer I }
+            ? // re-type from the threaded table — the mapped `infer V`
+              // instantiates drizzle's values param at its constraint, which
+              // accepts invalid columns
+              (value: I | I[]) => WrappedBuilder<R, E, L, TTable>
+            : A extends [infer V]
+              ? V extends readonly unknown[]
+                ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+                : (...args: A) => WrappedBuilder<R, E, L, TTable>
+              : (...args: A) => WrappedBuilder<R, E, L, TTable>
+          : K extends "set"
+            ? TTable extends { $inferInsert: infer I }
+              ? // same re-typing for the update set — the constraint
+                // instantiation accepts invalid update objects
+                (update: Partial<I>) => WrappedBuilder<R, E, L, TTable>
               : (...args: A) => WrappedBuilder<R, E, L, TTable>
             : (...args: A) => WrappedBuilder<R, E, L, TTable>
-          : (...args: A) => WrappedBuilder<R, E, L, TTable>
       : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {

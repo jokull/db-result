@@ -95,7 +95,12 @@ blog's `file:` dev link must be replaced once the migration settles.
 
 ## 3. `errorConstructor` from a typed options object omitted from the union (codex P2)
 
-**Severity: should fix before release** (unsound exhaustive handling).
+**Status: FIXED** — `NoResultErrorFor` now matches the OPTIONAL property; a
+variable typed `ExecuteTakeFirstOrThrowOptions` resolves the honest union.
+Follow-up refinement (second codex pass): when the options type's
+`errorConstructor` is optional AND the value is absent, the runtime falls
+back to `NoResultError` — the union keeps it (`ErrorFromCtor<NonNullable<C>>
+| (undefined extends C ? NoResultError : never)`).
 
 **Symptom** (`src/kysely.ts`, `NoResultErrorFor` ~lines 120-127): when the
 options are stored in a variable typed `ExecuteTakeFirstOrThrowOptions`, its
@@ -131,8 +136,12 @@ drizzle zero-arg forms); drop `| []` where drizzle has no zero-arg overload.
 
 ## 5. Kysely mutation `executeTakeFirst` always adds `undefined` (codex P2)
 
-**Severity: should fix before release** (forces consumers to handle an
-impossible no-row case).
+**Status: FIXED** — the takeFirst family computes the Ok from `ExecR` (the O
+slot is seeded `{}` and `values`/`set` never update it) and the factory
+signatures seed the real result types (`InsertResult`/`UpdateResult`/
+`DeleteResult`); `executeTakeFirstOrThrow` on mutation builders omits the
+impossible no-result error from its union (follow-up refinement from the
+second codex pass).
 
 **Symptom** (`src/kysely.ts` `TakeFirstFn` ~lines 111-114): the terminal
 resolves `Result<O | undefined, E>` unconditionally. Kysely's own
@@ -150,7 +159,6 @@ that can never happen at runtime.
 ## 6. `returning({ fields })` projections still degrade (follow-up from #1)
 
 **Status: OPEN — follow-up** (blog + README use the zero-arg form only).
-
 **Symptom:** `db.insert(t).values({…}).returning({ slug: true })` resolves a
 wrapped-but-degraded rows type instead of `{ slug: string }[]`.
 
@@ -162,6 +170,18 @@ not structurally reconstructible.
 **Fix direction:** re-select drizzle's own generic fields overload at the
 call (per-call inference), or thread the fields through like the table in #1.
 Consumers: use `tryDb(rawDb…)` for fields projections until fixed.
+
+---
+
+## 7. Wrapped write-chain args (`values`/`set`) were constraint-instantiated (codex P1, second pass)
+
+**Status: FIXED** — the `values` arm re-types from the threaded table's
+`$inferInsert` (`value: I | I[]`) and the update `set` arm from
+`Partial<I>`; invalid columns are rejected exactly like the unwrapped
+client. Root cause: `ReturnType<D["insert"]>` instantiates drizzle's
+generic factory without `TTable`, so the mapped chain's `values`/`set`
+params degraded to the constraint — the `TTable` threading only reached
+the zero-arg `returning()` arm. Same family as #1/#2.
 
 ---
 

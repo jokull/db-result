@@ -410,10 +410,10 @@ const ktfoDel = kdel.executeTakeFirstOrThrow();
 const ktfoUpd = kupd.executeTakeFirstOrThrow();
 type _kt4 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoSel>> extends true ? true : false>;
 type _kt5 = Assert<Member<Unique, ErrOfPromise<typeof ktfoIns>> extends true ? true : false>;
-type _kt6 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoIns>> extends true ? true : false>;
+type _kt6 = Assert<Absent<NoResultError, ErrOfPromise<typeof ktfoIns>> extends true ? true : false>;
 type _kt7 = Assert<Absent<Unique, ErrOfPromise<typeof ktfoDel>> extends true ? true : false>;
 type _kt8 = Assert<Member<Fk, ErrOfPromise<typeof ktfoDel>> extends true ? true : false>;
-type _kt9 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoUpd>> extends true ? true : false>;
+type _kt9 = Assert<Absent<NoResultError, ErrOfPromise<typeof ktfoUpd>> extends true ? true : false>;
 
 // write families keep `executeTakeFirst` too (raw Kysely has it on every
 // executable builder — the mapped type must not remove it). ISSUES.md #5:
@@ -475,6 +475,29 @@ type _kt19 = Assert<
   Absent<undefined, OkOf<ReturnType<typeof kupd.executeTakeFirst>>> extends true ? true : false
 >;
 
+// codex follow-up (P2): an ABSENT optional errorConstructor falls back to
+// NoResultError at runtime — the union must keep it (not just the custom
+// error) when the options type carries the property optionally.
+const ktOptsNarrow: { errorConstructor?: typeof Missing } = {};
+const ktfNarrow = ksel.executeTakeFirstOrThrow(ktOptsNarrow);
+type _kt20 = Assert<Member<Missing, ErrOfPromise<typeof ktfNarrow>> extends true ? true : false>;
+type _kt21 = Assert<
+  Member<NoResultError, ErrOfPromise<typeof ktfNarrow>> extends true ? true : false
+>;
+
+// codex follow-up (P2): mutation builders can never yield the no-result
+// error — non-returning insert/update/delete/merge terminals always produce
+// their result — so the takeFirstOrThrow union omits it for them.
+type _kt22 = Assert<
+  Absent<NoResultError, ErrOfPromise<typeof ktfoIns>> extends true ? true : false
+>;
+type _kt23 = Assert<
+  Absent<NoResultError, ErrOfPromise<typeof ktfoUpd>> extends true ? true : false
+>;
+type _kt24 = Assert<
+  Absent<NoResultError, ErrOfPromise<typeof ktfoDel>> extends true ? true : false
+>;
+
 // ─── relational queries — the read-shape E-track (sqlite db, blog pattern) ─
 
 import { defineRelations } from "drizzle-orm";
@@ -501,6 +524,12 @@ const sIns = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" });
 type _rel0 = Assert<
   Member<Unique, ErrOf<ReturnType<typeof sIns.execute>>> extends true ? true : false
 >;
+// codex follow-up (P1): values/set re-typed from the threaded table's
+// $inferInsert — invalid columns are rejected like the unwrapped client.
+// @ts-expect-error — bogus values column rejected
+const _sInsBad = wrappedSqlite.insert(rPosts).values({ bogus: 1 });
+// @ts-expect-error — bogus set column rejected
+const _sUpdBad = wrappedSqlite.update(rPosts).set({ bogus: 1 });
 // ISSUES.md #1: wrapped chains must keep drizzle's precise rows through
 // zero-arg `.returning()` — not the degraded Record<string, unknown>[].
 const sInsRet = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" }).returning();
