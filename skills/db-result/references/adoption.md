@@ -106,13 +106,13 @@ better-result itself:
 1. **Start at I/O boundaries.** Database access, HTTP clients, file systems.
 2. **Classify the failures you already handle:**
 
-   | Today                                              | Becomes                                                 |
-   | -------------------------------------------------- | ------------------------------------------------------- |
-   | `err.code === "23505"` / `1062` / `2627` / `P2002` | `isUniqueViolation(e)` / `"db/unique-violation"`        |
-   | `"deadlock detected"` / `1213` / `1205`            | `"db/deadlock"` (auto-retried)                          |
-   | `ECONNREFUSED` / pool-timeout messages             | `"db/connect-failure"` (auto-retried)                   |
-   | `SQLITE_BUSY` / `1205` / `55P03`                   | `"db/lock-timeout"` (auto-retried)                      |
-   | everything else you catch                          | rethrown — a request for a new mapping, not a catch-all |
+   | Today                                              | Becomes                                                   |
+   | -------------------------------------------------- | --------------------------------------------------------- |
+   | `err.code === "23505"` / `1062` / `2627` / `P2002` | `UniqueViolation.is(e)` — or fold `"db/unique-violation"` |
+   | `"deadlock detected"` / `1213` / `1205`            | `"db/deadlock"` (auto-retried)                            |
+   | `ECONNREFUSED` / pool-timeout messages             | `"db/connect-failure"` (auto-retried)                     |
+   | `SQLITE_BUSY` / `1205` / `55P03`                   | `"db/lock-timeout"` (auto-retried)                        |
+   | everything else you catch                          | rethrown — a request for a new mapping, not a catch-all   |
 
 3. **Wrap the boundary:** `tryDb(() => db.insert(users).values({ email }).returning())`.
    Callers now receive `Result<T, DbError>`.

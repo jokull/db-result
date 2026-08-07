@@ -11,7 +11,7 @@ const [user] = await tryDb(() => sql`select * from users where id = ${id}`);
 
 // drizzle / kysely / prisma — API untouched, outcome wrapped
 const created = await tryDb(() => db.insert(users).values({ email }).returning());
-if (created.isErr() && isUniqueViolation(created.error)) {
+if (created.isErr() && UniqueViolation.is(created.error)) {
   return errors.EmailTaken({ email, constraint: created.error.constraint });
 }
 ```
@@ -44,7 +44,7 @@ under concurrent requests for the same email:
 ```ts
 const outcome = await tryDb(() => db.insert(users).values({ email }).returning());
 if (outcome.isOk()) return ok(outcome.value[0]);
-if (isUniqueViolation(outcome.error)) {
+if (UniqueViolation.is(outcome.error)) {
   return errors.EmailTaken({ email, constraint: outcome.error.constraint });
 }
 return internal(outcome.error); // connection, syntax, … — report, don't guess

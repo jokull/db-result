@@ -21,13 +21,15 @@ never in the tag.
 | `db/sql-syntax-error`      | —            | the SQL (or schema reference) is wrong                                    | never                   |
 | `db/query-failure`         | —            | everything else that is a database failure                                | transient subset only   |
 
-Guards for every tag (`isUniqueViolation(e)`, `isDeadlock(e)`, …), plus the
-boundary check `isDbError(e)` (the whole union) and `isRetriedError(e)` (the
-failure survived retries — carries `e.retries`). `isConnectionFailure(e)` is
-the family guard for either connection tag (`isConnectFailure` /
-`isConnectionLost` narrow individually). Every error carries
-`potentiallyTransient?: boolean` — a hint, never a policy; the retry policy
-owns what actually retries (see [retry.md](./retry.md)).
+Per-tag checks are the classes' own static `is` — `UniqueViolation.is(e)`,
+`QueryFailure.is(e)` — the same idiom as better-result's `TaggedError.is`.
+The boundary check `isDbError(e)` covers the whole union, and
+`isRetriedError(e)` tells you the failure survived retries (carries
+`e.retries`). `isConnectionFailure(e)` is the family guard for either
+connection tag (`ConnectFailure.is` / `ConnectionLost.is` narrow
+individually). Every error carries `potentiallyTransient?: boolean` — a
+hint, never a policy; the retry policy owns what actually retries (see
+[retry.md](./retry.md)).
 
 ## Per-driver union matrix
 
