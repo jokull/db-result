@@ -24,10 +24,13 @@ classification time; the policy defaults are per-error.
 `tryDb` auto-retries the transient set by default (`retryTransient: true`),
 with per-error backoff:
 
-| failure                                                                   | backoff    |
-| ------------------------------------------------------------------------- | ---------- |
-| deadlock / lock-timeout / busy / statement-timeout / too-many-connections | 50ms × 2ⁿ  |
-| connect-refused / DNS / connect-timeout                                   | 200ms × 2ⁿ |
+| failure                                               | backoff    |
+| ----------------------------------------------------- | ---------- |
+| deadlock / lock-timeout / busy / too-many-connections | 50ms × 2ⁿ  |
+| connect-refused / DNS / connect-timeout               | 200ms × 2ⁿ |
+
+Statement-timeout (`57014`) has no distinct tag yet — it folds into transient
+`db/query-failure` (auto-retried, matched as `db/query-failure`).
 
 ## Config
 

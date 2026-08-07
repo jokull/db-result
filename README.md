@@ -1,382 +1,204 @@
 # db-result
 
-> Database failures as better-result tagged errors — `Result<T, DbError>`, **retry-safe**,
-> driver-agnostic. Stop hand-writing `instanceof` / `error.code` checks and hand-rolling
-> retry loops. **Attempt the insert — that _is_ the uniqueness check** — we classify the
-> failure and decide what's worth retrying.
+> Database failures as better-result tagged errors — `Result<T, DbError>`, retry-safe,
+> driver-agnostic. **Attempt the insert — that _is_ the uniqueness check** — we classify
+> the failure and decide what's worth retrying.
 
 ```sh
 bun add better-result db-result
 ```
 
-## Docs for coding agents
+Built on [better-result](https://github.com/dmmulroy/better-result) — you adopt its
+`Result` model too: `tryDb` returns `Result<T, DbError>`, folds with
+`matchErrorPartial`, composes in `Result.gen`.
 
-The skill at [`skills/db-result/SKILL.md`](skills/db-result/SKILL.md) is the
-starting point for agents: an escalation ladder (new to better-result → install →
-migrate → reference) and a task map. The canonical, maintained documentation —
-the full 14-tag vocabulary, per-driver unions, the shape lattice, retry doctrine,
-and transaction guide — lives in
-[`skills/db-result/references/`](skills/db-result/references/).
+- **Classify** every driver failure into one of 14 `db/*` tags — same tags across every
+  driver and ORM (pg, SQLite incl. D1, mysql, mssql, Prisma, Kysely, Drizzle):
 
-**The hard work, done for you:**
+  ```ts
+  // constraints         data          contention            connection
+  unique-violation       data-error    deadlock              connect-failure
+  foreign-key-violation                lock-timeout          connection-lost
+  not-null-violation                   transaction-aborted
+  check-violation        // identity   // other
+                         authentication-failed   sql-syntax-error
+                         authorization-failed    query-failure
+  ```
 
-- **Classify** every database failure into fourteen `db/*` tags — any driver, any ORM.
-- **Narrow** the error union from the thunk's parameter type — declare a Kysely
-  `Transaction`, a Drizzle `PgSelect`, a Prisma `UserFindManyArgs`, and the
-  impossible tags compile out of your union.
-- **Retry** the failures worth retrying, with per-error backoff — and never touch the
-  deterministic ones or the ambiguous ones where retrying could double-commit a write.
-- **Compose** — `Result<T, DbError>` out of any thenable or thunk, ready for
-  `Result.gen`, `matchErrorPartial`, and guards.
+  No `instanceof`, no `error.code === "23505"`.
 
----
+- **Narrow** the error union from the thunk's parameter type — declare a
+  `Transaction`, a `PgSelect`, a `UserFindManyArgs`, and the impossible tags compile out.
+- **Retry** only what's provably safe, with per-error backoff — never the deterministic
+  errors, never the ambiguous mid-query connection loss (the write may have committed).
+- **Fold** at your handler boundary: match the tags you care about with
+  `matchErrorPartial` (the better-result fold helper), and its terminal arm handles
+  whatever you don't fold — 500 + observability, with the compiler listing what you're
+  ignoring.
 
-## The DX dream
+## Example
 
 ```ts
-import { Result, matchErrorPartial } from "better-result";
-import { tryDb } from "db-result";
+import { matchErrorPartial } from "better-result";
+import { tryDb } from "db-result/pg"; // or /sqlite /mysql2 /mssql /d1 — subpath per driver
 
-const handleSignup = async (c: Context) => {
-  const outcome = await Result.gen(async function* () {
-    // yield* short-circuits on Err; the error union accumulates across yields
-    const body = yield* Result.await(parseBody(c.req)); // Err: BodyError
-    const [user] = yield* Result.await(
-      tryDb(() =>
-        // Err: DbError
-        db.insert(users).values({ email: body.email }).returning(),
-      ),
-    );
-    return Result.ok(c.json({ id: user.id }, 201));
-  });
-  // outcome: Result<Response, BodyError | DbError> — hover it and see the full union
+const outcome = await tryDb(() => db.insert(users).values({ email }).returning());
 
-  if (outcome.isOk()) return outcome.value;
-
-  // Fold only what you care about. The remainder is typed, not implicit:
+if (outcome.isErr()) {
   return matchErrorPartial(
     outcome.error,
     {
       "db/unique-violation": (e) => c.json({ error: "email_taken", constraint: e.constraint }, 409),
-      "body/invalid": (e) => c.json({ error: "invalid_body", issues: e.issues }, 422),
     },
     (unhandled) => {
-      // the compiler spells out what you're choosing to ignore:
-      //   db/foreign-key-violation | db/not-null-violation | db/check-violation |
-      //   db/connect-failure | db/connection-lost | db/authentication-failed |
-      //   db/authorization-failed | db/sql-syntax-error | db/query-failure
-      reportError(unhandled); // tag + cause + stack → your observability
+      reportError(unhandled); // the compiler spells out the remaining tags here
       return c.json({ error: "internal" }, 500);
     },
   );
-};
+}
 ```
 
-No `instanceof`, no `error.code === "23505"`, no try/catch. The union is the contract,
-not the work: unhandled tags default to 500, logged with their `cause`, and the types
-tell you exactly what you're choosing to ignore.
+**Pass a thunk, not a promise** — `tryDb(() => …)`: a settled promise can't re-run, so
+retries would re-await the same outcome and can never succeed (dev builds warn once).
+Opt-in per call site — wrap one endpoint, leave the rest throwing. Transactions: wrap
+the whole `db.transaction()` in `tryTx` (whole-thunk retry) or statements in
+`tryDb((tx) => …)` — [transactions](./skills/db-result/references/transactions.md).
 
-Retry lives below — the short version: **on by default, and safe**.
+## Retry — the doctrine, in one breath
 
----
-
-## Retry — the hard part, done
-
-Retrying a database call sounds easy. It isn't:
-
-- Retry **everything** and you double-commit writes — the classic "the connection died
-  mid-INSERT, was it committed?" problem.
-- Retry **nothing** and deadlocks, lock contention and a busy database crash your app
-  for no reason.
-- Get the **backoff** wrong and you hammer a sick database into the ground.
-
-`db-result` makes these calls for you. `retryTransient` defaults to `true`:
-
-| error                                                                                       | auto-retry?                                 | default backoff                                                  |
-| ------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| deadlock `40P01` / serialization `40001` / lock-timeout `55P03` / statement-timeout `57014` | ✅                                          | 50ms × 2ⁿ                                                        |
-| too-many-connections `53300`                                                                | ✅                                          | 50ms × 2ⁿ                                                        |
-| `SQLITE_BUSY` / `SQLITE_LOCKED`                                                             | ✅                                          | 50ms × 2ⁿ                                                        |
-| connect-refused / DNS / connect-timeout (`ECONNREFUSED`, `ENOTFOUND`, …)                    | ✅                                          | 200ms × 2ⁿ                                                       |
-| unique / foreign-key / not-null / check / auth / authz / syntax                             | ❌ deterministic — retrying is theater      | —                                                                |
-| connection lost **mid-query** (`08006`, `ECONNRESET`, …)                                    | ❌ ambiguous — the write may have committed | — (still flagged `potentiallyTransient` for a deliberate policy) |
-
-That last row is the one everyone gets wrong: retrying a mid-query connection loss can
-duplicate the write you thought failed. We flag it, we don't retry it — you still can,
-on purpose.
-
-```ts
-const created = await tryDb(() => db.insert(users).values({ email }).returning());
-// transient failures auto-retry with the backoffs above — zero config
-
-await tryDb(q, { retryTransient: false }); // never auto-retry
-await tryDb(q, {
-  // take over: you own times/delay/shouldRetry
-  retry: { times: 5, delayMs: 50, backoff: "exponential" },
-});
-```
-
-An explicit `retry` always wins — and the safe gate is injected even then: a custom
-policy without `shouldRetry` still won't retry a unique violation.
-
-**The thunk form is required for retry to function.** `tryDb(promise)` works, but a
-settled promise can't re-run — retries would re-await the same outcome and can never
-succeed. Pass a thunk: `tryDb(() => db.insert(...).returning())` (dev builds warn once
-when you pass a promise with retry active). Keep the thunk to the SQL statement — it
-runs once per attempt, so hoist async work (`await`-ed values) and any narrowed
-variables out of it.
-
-**Did a retry actually happen?** A failure that survived its retries carries a
-non-enumerable attempt count — `isRetriedError(err)` narrows to `err.retries` — so a
-handler can log _"deadlock retried 3× before failing"_ differently from a first-try
-error.
-
----
-
-## The vocabulary
-
-Fourteen tags. Protocol-agnostic: the tag means the same thing on any database — the
-driver identity stays in `cause`, never in the tag.
-
-| tag                        | carries      | meaning                                                |
-| -------------------------- | ------------ | ------------------------------------------------------ |
-| `db/unique-violation`      | `constraint` | unique or primary-key conflict                         |
-| `db/foreign-key-violation` | `constraint` | referenced row doesn't exist                           |
-| `db/not-null-violation`    | `constraint` | required value absent                                  |
-| `db/check-violation`       | `constraint` | a check rejected the value                             |
-| `db/data-error`            | —            | value too long, numeric overflow, invalid text input   |
-| `db/deadlock`              | —            | deadlock or serialization failure                      |
-| `db/lock-timeout`          | —            | waited too long for a lock (incl. `SQLITE_BUSY`)       |
-| `db/transaction-aborted`   | —            | the transaction is dead (`25P02`, `P2028`)             |
-| `db/connect-failure`       | —            | channel never established (refused, DNS, pool timeout) |
-| `db/connection-lost`       | —            | channel died mid-query — outcome unknown               |
-| `db/authentication-failed` | —            | credentials rejected                                   |
-| `db/authorization-failed`  | —            | insufficient permission                                |
-| `db/sql-syntax-error`      | —            | the SQL (or schema reference) is wrong                 |
-| `db/query-failure`         | —            | everything else that's a database failure              |
-
-All fourteen classes are exported, plus a guard per tag (`isUniqueViolation(e)`,
-`isDeadlock(e)`, `isConnectFailure(e)`, `isConnectionLost(e)`, …), the family guard
-`isConnectionFailure(e)` (either connection tag), and the boundary check
-`isDbError(e)` (true for the whole union) plus `isRetriedError(e)` (true when a
-failure survived retries, exposing `error.retries` as the attempt count). `DbError`
-is the union.
-
-Every classified error carries `potentiallyTransient?: boolean` — `true` for the
-retryable set, never for constraints or auth. It's a hint, not a policy: the
-[retry section](#retry--the-hard-part-done) owns the policy and auto-retries only
-the safe subset.
-
----
+Deterministic failures (constraints, auth, syntax) never retry — it's theater. The
+transient set (deadlock incl. serialization `40001` and Prisma's `P2034`,
+lock-timeout, busy, connect-refused, too-many-connections) auto-retries with
+per-error backoff. **Connection lost mid-query never auto-retries** —
+the write may have committed; retrying could double it. That's the row everyone gets
+wrong. An explicit `retry` config always wins; `isRetriedError(e)` tells you a failure
+survived N attempts. If your ORM has its own retry layer underneath (Prisma's pool
+acquisition), db-result's retries stack on top — set `retryTransient: false` to keep
+only the ORM's, or disable the ORM's to keep only ours.
+Details: [retry](./skills/db-result/references/retry.md).
 
 ## Shape-aware types — the union narrows itself
 
-`tryDb` reads the thunk's **parameter type** as structural evidence of what the
-query can and cannot do — and narrows the error union to exactly what that shape
-can produce. Declare the parameter; the impossible tags compile out. Hover the
-result: the compiler spells out a different union per shape, for free:
+Declare the thunk's parameter; its type is evidence of what the query can and cannot
+do, and the impossible tags compile out of the union. That's a **probe** — the
+declared parameter doubles as type evidence (the thunk closes over the real client,
+so the parameter is never used at runtime):
 
 ```ts
 import type { SelectQueryBuilder, Transaction, DeleteQueryBuilder } from "kysely";
-import { tryDb, matchErrorPartial } from "db-result"; // + better-result
+import type { PgSelect } from "drizzle-orm/pg-core";
+import type { Prisma } from "@prisma/client";
 
 interface DB {
   users: { id: number; email: string; name: string };
 }
 
-// 1. zero-arg thunk: no evidence — everything is possible
+// zero-arg: the happy path — no evidence, all 14 tags, retry on
 tryDb(() => db.selectFrom("users").selectAll().execute());
-//   ^? Promise<Result<User[], DbError>>           — all 14 tags
 
-// 2. a select builder: constraints are write-only — four tags + tx-aborted gone
+// select builder: constraints are write-only — unique/fk/not-null/check + tx-aborted gone
 tryDb((q: SelectQueryBuilder<DB, "users", {}>) => db.selectFrom("users").selectAll().execute());
-//   ^? Promise<Result<User[], DbError minus {
-//        db/unique-violation | db/foreign-key-violation | db/not-null-violation
-//      | db/check-violation | db/transaction-aborted }>
+//   ^? Result<User[], DbError minus { unique | fk | not-null | check | transaction-aborted }>
 //   deadlock stays (SELECT … FOR UPDATE); data-error stays (read conversions)
 
-// 3. a transaction client: the callback ran after acquire + BEGIN —
-//    authn/connect-failure are impossible, and statement auto-retry turns off
-tryDb((tx: Transaction<DB>) => tx.insertInto("users").values({ email }).execute());
-//   ^? Promise<Result<…, DbError minus {
-//        db/authentication-failed | db/connect-failure }>
+// transaction client (any ORM): begin succeeded — authn/connect-failure gone,
+// statement retry off
+tryDb((tx: Transaction<DB>) => db.insertInto("users").values({ email }).execute());
 
-// 4. a delete builder: FK is the only constraint a DELETE can hit
+// drizzle and prisma probe the same way — and plain calls classify without a probe
+tryDb((q: PgSelect) => db.select().from(users));
+tryDb((args: Prisma.UserFindManyArgs) => prisma.user.findMany({ where: { id } }));
+tryDb(() => prisma.user.create({ data: { email } })); // P2002 → db/unique-violation
+
+// delete builder: FK is the only constraint a DELETE can hit
 tryDb((q: DeleteQueryBuilder<DB, "users", {}>) =>
-  q.deleteFrom("users").where("id", "=", id).execute(),
-);
-//   ^? Promise<Result<…, DbError minus {
-//        db/unique-violation | db/not-null-violation | db/check-violation
-//      | db/transaction-aborted }>                 — foreign-key-violation survives
-```
-
-Then fold it — and the terminal only lists what's genuinely left:
-
-```ts
-return matchErrorPartial(
-  outcome.error, // the narrowed union from shape 2 above
-  { "db/unique-violation": (e) => c.json({ error: "email_taken" }, 409) },
-  (unhandled) => {
-    // the compiler's exhaustive list, nothing more:
-    //   db/deadlock | db/lock-timeout | db/data-error | db/connect-failure |
-    //   db/connection-lost | db/authentication-failed | db/authorization-failed |
-    //   db/sql-syntax-error | db/query-failure
-    reportError(unhandled);
-    return c.json({ error: "internal" }, 500);
-  },
+  db.deleteFrom("users").where("id", "=", id).execute(),
 );
 ```
 
-The lattice knows your ORM _and_ your driver. Kysely builders, Drizzle
-builders, Prisma args objects — each probed structurally, no imports, zero
-runtime cost (the probes compile away). Prisma args are the subtle one:
-`{ take, orderBy }` is provably a read, while `{ where }`-only args (shared by
-`findUnique` and `delete`) narrow to the delete set — FK stays, because
-delete/deleteMany can FK-fail. And `db-result/sqlite` keeps `connect-failure`
-inside transactions on purpose: a SQLite tx can still `ATTACH DATABASE`, which
-fires CANTOPEN mid-query — the lattice refuses to lie.
+`tryDb` never passes an argument — the parameter is `undefined` at runtime; its type
+is the only signal. Every example closes over the real client (`db`, `prisma`);
+declare the parameter, ignore it. Name it `_q` if your lint flags unused parameters.
 
-**It refuses to guess.** A one-arg thunk whose parameter proves no shape is a
-compile error — no silent widening to the full union:
+Then the fold terminal lists only what's genuinely left — for the select shape above:
 
 ```ts
-tryDb((client: { selectFrom(): unknown }) => …); // ✗ no overload matches
-// use the zero-arg form instead of guessing
+(unhandled) => {
+  // db/deadlock | db/lock-timeout | db/data-error | db/connect-failure |
+  // db/connection-lost | db/authentication-failed | db/authorization-failed |
+  // db/sql-syntax-error | db/query-failure
+  reportError(unhandled);
+  return c.json({ error: "internal" }, 500);
+};
 ```
 
-The full lattice — every probe, the per-driver ledgers, the "reads that write"
-footgun (DML CTEs can still violate constraints — the runtime classifies them
-correctly, they just fall to the terminal), the honest ceilings — lives in
-[`references/shapes.md`](skills/db-result/references/shapes.md).
+Structural probes only — no ORM imports, zero runtime cost (the probes compile away).
+Chained queries keep the probe: joins, `where`, `orderBy` aren't probe keys, so a
+realistic select still narrows. The zero-arg form is the happy path; reach for the
+probe when you want the terminal (the `matchErrorPartial` unhandled arm) to list
+exactly what's left. **It refuses to guess:** a one-arg thunk whose parameter proves
+no shape is a compile error, not a silent widening to the full union. The narrowing
+is an optimization you opt into by declaring the shape — a wrong declaration widens
+the union, never lies at runtime (the classifier stays honest regardless). Full
+lattice, footguns, and per-driver ledgers:
+[shapes](./skills/db-result/references/shapes.md).
 
----
+## Drivers
 
-## How it works — protocol detection
+One package, subpath entry points per protocol: `db-result/pg`, `/sqlite`, `/d1`,
+`/mysql2`, `/mssql` — every driver Drizzle and Kysely support maps to one of them (the
+classifier reads protocol signals: SQLSTATE, SQLite codes, mysql errno, mssql number,
+Prisma P-codes). Your ORM name is not an entry point — Kysely-on-Postgres imports from
+`db-result/pg`, Drizzle-on-SQLite from `db-result/sqlite`. Drizzle: classification is
+wrapper-transparent (the cause chain reaches the driver error regardless of version);
+the narrowing probes are verified against 1.0+ (currently `1.0.0-rc.4`) — on ~0.9
+use the zero-arg form. Full map: [adoption](./skills/db-result/references/adoption.md).
 
-`tryDb` reads the **protocol** error shape, not any ORM's. It walks `Error.cause` chains
-(plus the payload slots Effect wrappers use — `cause`/`failure`/`error`/`defect`) to reach
-the error that carries the protocol fields:
+## Docs for agents (and humans who want details)
 
-| Protocol              | Signal                                              | Drivers                                         |
-| --------------------- | --------------------------------------------------- | ----------------------------------------------- |
-| PostgreSQL SQLSTATE   | `code: "23505"` + `constraint` field                | `pg`, `postgres.js`, Drizzle over pg            |
-| SQLite extended codes | `code: "SQLITE_CONSTRAINT_UNIQUE"`, `errcode: 2067` | better-sqlite3, node:sqlite, libsql, bun:sqlite |
-| SQLite message shapes | `"UNIQUE constraint failed: t.c"`                   | D1, wa-sqlite, anything that sets no code       |
-| MySQL protocol        | `errno: 1062` / `code: "ER_DUP_ENTRY"`              | mysql2                                          |
-| SQL Server            | `number: 2627`                                      | mssql                                           |
-| Connection layer      | `code: "ECONNREFUSED"`, pool messages               | every driver — Node system errors               |
+The skill at [`skills/db-result/SKILL.md`](skills/db-result/SKILL.md) is the map: an
+escalation ladder and a task index into [`references/`](skills/db-result/references/) —
+[overview](skills/db-result/references/overview.md) (the idea in one page),
+[vocabulary](skills/db-result/references/vocabulary.md) (the 14 tags, per-driver
+unions), [retry](skills/db-result/references/retry.md), [transactions](skills/db-result/references/transactions.md),
+[patterns](skills/db-result/references/patterns.md) (upsert, idempotency keys, not-found).
 
-So the same classifier works at the driver-call level — `client.query(...)`,
-`db.prepare(...).run()`, `db.insert(...)` are all just thenables — and it sees through
-wrappers (DrizzleQueryError, Effect-shaped nesting) to the driver error. Classification
-is duck-typed but strictly guarded: only `^[0-9A-Z]{5}$` codes count as SQLSTATE, only
-enumerated prefixes count as driver codes, and constraint extraction accepts dotted
-identifiers only — query text and parameters can never leak into the error data.
+## The sharp edges, up front
 
-## What `tryDb` does _not_ classify
+- **Rethrown, not labeled.** An error that matches no known protocol shape is
+  rethrown as a real exception — your existing try/catch still works (inside
+  `Result.gen` it surfaces as a `Panic`). Never tagged `db/query-failure`. That
+  includes errors you throw inside the thunk: only driver-originated failures are
+  classified. `db/query-failure` is for _known-but-unspecific_ shapes. Unknown shapes
+  are a request for a new mapping, not a catch-all.
+- **Not-found is data, not a tag.** A missing row is `null` / your domain error —
+  never a `db/*` tag. Kysely's `NoResultError` has no protocol shape, so it's
+  rethrown, not labeled. Prisma's `P2025` is a known-but-unspecific shape, so it
+  lands in `db/query-failure` — reachable, but deliberately not
+  tag-distinguished: prefer `findFirst`/`findUnique` and check `null`.
+- **`constraint` is the driver's identifier**, not a normalized key — SQLite gives
+  `table.column`, Postgres gives the constraint name. Match on the tag, disambiguate
+  by `constraint` inside the arm (`users_email_key` vs an unexpected index), and use
+  it for observability.
+- **Fold arms read `_tag`, `constraint`, `potentiallyTransient`, and the driver
+  error on `cause`.** Strip `cause` at wire boundaries — better-result's `toJSON()`
+  spreads it (with stack) by design.
 
-`tryDb` classifies **database failures** — nothing else. An error that matches no known
-protocol shape is **rethrown**, loudly, as the bug it is. A `TypeError` from your own
-callback is not a database failure and will not be labeled `db/query-failure`; in
-`Result.gen` it surfaces as better-result's `Panic` — the defect channel, separate from
-the tag union. Unknown driver shapes crash on purpose: they're a request for a new
-mapping, not something to hide in the catch-all.
+## Verification
 
----
-
-## Drivers & verification
-
-One package, subpath entry points per driver. Real tests run locally — **no CI, ever** —
-against a Docker suite and embedded engines.
+Runs on Node ≥ 18 and Bun (D1/miniflare targets Workers). ESM only; TypeScript ≥ 5.4.
+Real-driver tests run locally against a Docker suite (pg 16, mysql 8, mssql 2022) and
+embedded engines (bun:sqlite, node:sqlite, better-sqlite3, libsql, D1/miniflare):
 
 ```sh
-docker compose up -d     # postgres:16, mysql:8, mssql 2022
-bun run test:integration # the full real-driver pass
-docker compose down
+bun test                          # fixtures + embedded — zero setup
+docker compose up -d --wait       # + the three DSNs (see package.json) →
+bun run test:integration
 ```
 
-| Driver           | Signal                 | Proof                       |
-| ---------------- | ---------------------- | --------------------------- |
-| `pg`             | SQLSTATE + constraint  | real — Docker postgres      |
-| `postgres.js`    | SQLSTATE               | real — Docker postgres      |
-| `mysql2`         | `errno`                | real — Docker mysql         |
-| `mssql`          | `number`               | real — Docker sqlserver     |
-| `bun:sqlite`     | codes / errcode        | real — embedded             |
-| `node:sqlite`    | `errcode`              | real — Node runner          |
-| `better-sqlite3` | code strings           | real — embedded             |
-| D1               | message shapes + cause | real — miniflare            |
-| `libsql`         | extended codes         | real — `file:` embedded     |
-| `wa-sqlite`      | numeric code           | fixtures                    |
-| Drizzle 1.0+     | wrapper chain          | real — wrapping its queries |
+Status: `0.0.1`, MIT, pre-1.0. Every release runs the full suite above first.
 
-## Drizzle
-
-db-result is a **caller, not a wrapper**. It wraps the _outcome_ of any thenable —
-including a drizzle 1.0+ query — and classifies the underlying driver error through
-drizzle's wrapper via the cause chain. Drizzle's API is untouched; you keep building
-queries your way:
-
-```ts
-const created = await tryDb(() => db.insert(users).values({ email }).returning());
-if (created.isErr() && isUniqueViolation(created.error)) {
-  return errors.EmailTaken({ email, constraint: created.error.constraint });
-}
-```
-
-Requires drizzle **1.0+** — currently `1.0.0-rc.4`, which is exactly what we target and test against; `~0.9` error shapes are not supported.
-
----
-
-## The pattern
-
-1. **Compose private failures.** DB errors are composition currency, not wire errors —
-   keep them out of your API contract.
-2. **Fold at the boundary.** In a handler, fold the `db/*` tags you care about into your
-   domain errors (`EmailTaken`, `OrderInvalid`…); let `matchErrorPartial`'s terminal turn
-   the rest into 500 + observability.
-3. **Attempt the insert is the uniqueness check** — including under races.
-
-> **Typing the fold terminal:** `matchErrorPartial`'s terminal slot is contravariant —
-> when your app's declared errors are stricter, wire-shaped tagged errors (e.g.
-> result-rpc's), type the terminal's parameter as the _wider_ better-result
-> `TaggedErrorLike`, or the 3-arg `matchErrorPartial(error, folds, terminal)` call stops
-> typechecking.
-
-## Growth test
-
-A tag earns its place when it changes a caller decision real apps make, **and** ≥2
-drivers give it a stable signal. Waiting in the wings, unearned so far: `db/data-error`
-(value too long, numeric overflow) and `db/statement-timeout` — when a real fold needs
-them and the signals stabilize, they'll earn the tag.
-
-## Sharp edge
-
-better-result's upstream `TaggedError.toJSON()` spreads `cause` (with stack) by design —
-fine for logs, but **strip `cause` before any wire boundary** or error-reporting service
-that serializes the instance.
-
----
-
-## Running the suite
-
-```sh
-bun install
-bun test                  # fixtures + embedded drivers — zero setup
-docker compose up -d --wait
-PGTEST_DSN="postgres://postgres:postgres@127.0.0.1:5433/postgres" \
-MYSQLTEST_DSN="mysql://root:root@127.0.0.1:3307" \
-MSSQLTEST_DSN="mssql://sa:DbResult!Passw0rd@127.0.0.1:1434/master" \
-bun run test:integration  # real pg, mysql2, mssql (DSN-less engines skip)
-docker compose down
-```
-
-## Provenance
-
-Classification technique modeled on [Effect SQL's `SqlError` classifier](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/unstable/sql/SqlError.ts),
-finer on the constraint family (Effect collapses FK/not-null/check into one
-`ConstraintError` — the fold-at-boundary case needs them separate), and corrected where
-Effect falls short (it masks SQLite extended codes, misses transient `53300`, and has no
-mssql statement-timeout). Extracted from result-rpc's `tryDb`
-([`result-rpc/db`](https://github.com/jokull/result-rpc/blob/main/src/db.ts)), which ships
-the same classifier inside the RPC library. Shared here to answer "how do community
-helpers for better-result get shared?" — see [the discussion](https://github.com/dmmulroy/better-result/issues/108).
+Classification modeled on [Effect SQL](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/unstable/sql/SqlError.ts),
+finer on the constraint family (FK/not-null/check stay separate for the fold),
+corrected where Effect falls short (masks SQLite extended codes, misses transient
+`53300`). Extracted from [result-rpc](https://github.com/jokull/result-rpc/blob/main/src/db.ts).

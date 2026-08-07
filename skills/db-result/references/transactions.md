@@ -50,6 +50,9 @@ DEFERRED` constraints report `23505`/`23503` on `COMMIT`, not on the INSERT —
 3. **A `db/transaction-aborted` error means stop.** The transaction is dead;
    roll back, don't continue. `25P02` (Postgres) and Prisma `P2028` both map to
    it.
+4. **Write conflicts retry as a whole transaction.** Prisma's `P2034` ("write
+   conflict or deadlock") is the transient to expect from interactive
+   `$transaction` under contention — retried by `tryTx`'s whole-thunk policy.
 
 ## In-transaction statement — `tryDb((tx) => …)`
 
