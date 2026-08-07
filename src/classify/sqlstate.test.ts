@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { tryDb, isConnectFailure, isConnectionLost, type DbError } from "../db-result.js";
+import { tryDb, ConnectFailure, ConnectionLost, type DbError } from "../db-result.js";
 
 const constraintOf = (e: DbError): string => (e as { constraint?: string }).constraint ?? "";
 const transientOf = (e: DbError): boolean =>
@@ -82,7 +82,7 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/connection-lost");
       expect(transientOf(result.error)).toBe(true);
-      expect(isConnectionLost(result.error)).toBe(true);
+      expect(ConnectionLost.is(result.error)).toBe(true);
     }
   });
 
@@ -93,7 +93,7 @@ describe("PostgreSQL protocol (SQLSTATE + constraint field)", () => {
     if (result.isErr()) {
       expect(result.error._tag).toBe("db/connect-failure");
       expect(transientOf(result.error)).toBe(true);
-      expect(isConnectFailure(result.error)).toBe(true);
+      expect(ConnectFailure.is(result.error)).toBe(true);
     }
   });
 

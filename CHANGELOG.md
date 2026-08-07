@@ -8,6 +8,11 @@ Dogfooded against a real D1 + drizzle 1.0.0-rc.4 codebase (the blog), which surf
 
 ### Added
 
+- **Per-tag guards are the classes' own static `is`** — the tag classes export
+  as values, so `UniqueViolation.is(e)` narrows exactly like
+  `isUniqueViolation(e)` did (the better-result `TaggedError.is` idiom); the
+  `isXxx` predicate functions are gone. Family guards stay as functions:
+  `isConstraintViolation`, `isConnectionFailure`, `isDbError`, `isRetriedError`.
 - **Relational query E-track in `drizzleTryDb`** — `db.query.<table>.findMany/findFirst/findOne` resolve `Result<T, readUnion>` (constraint tags excluded per the driver's ledger) with the same classification and retry; `$dynamic` builders are wrapped recursively. The blog's relational-first surface is now fully on Result shapes.
 - **Driver-agnostic drizzle wrapper types** — the wrapper is structural over the db's own method signatures (it was `PgAsyncDatabase`-only), so pg, sqlite/D1, mysql, and mssql drizzle databases all typecheck with no drizzle-internal imports.
 - **Zero-arg `.returning()` restored** on wrapped drizzle chains — the mapped type kept only the overloaded columns form, breaking `.values(...).returning()`.

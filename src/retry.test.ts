@@ -3,8 +3,8 @@ import type { Result } from "better-result";
 import {
   tryDb,
   tryTx,
-  isConnectFailure,
-  isConnectionLost,
+  ConnectFailure,
+  ConnectionLost,
   isRetriedError,
   type DbError,
 } from "./db-result.js";
@@ -85,8 +85,8 @@ describe("retry policy — retryTransient defaults to true, per-error defaults",
     expect(lostAttempts).toBe(1);
     if (lost.isErr()) {
       expect(lost.error._tag).toBe("db/connection-lost");
-      expect(isConnectFailure(lost.error)).toBe(false);
-      expect(isConnectionLost(lost.error)).toBe(true);
+      expect(ConnectFailure.is(lost.error)).toBe(false);
+      expect(ConnectionLost.is(lost.error)).toBe(true);
     }
   });
 

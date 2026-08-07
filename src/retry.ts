@@ -2,9 +2,9 @@ import { Result } from "better-result";
 import {
   type DbError,
   isConnectionFailure,
-  isQueryFailure,
-  isDeadlock,
-  isLockTimeout,
+  QueryFailure,
+  DeadlockError,
+  LockTimeoutError,
 } from "./tags.js";
 import { classify } from "./classify/index.js";
 import {
@@ -62,7 +62,9 @@ const withCause = (error: DbError, cause: unknown): DbError => {
 const retryDelay = (error: DbError, ctx: TryPromiseContext): number => {
   const backoff = 2 ** (ctx.attempt - 1);
   if (isConnectionFailure(error)) return 200 * backoff; // reconnect, wait longer
-  if (isQueryFailure(error) || isDeadlock(error) || isLockTimeout(error)) return 50 * backoff;
+  if (QueryFailure.is(error) || DeadlockError.is(error) || LockTimeoutError.is(error)) {
+    return 50 * backoff;
+  }
   return 100 * backoff;
 };
 

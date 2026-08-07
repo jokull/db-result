@@ -43,39 +43,26 @@
  * `./retry.js`. This file is the public surface.
  */
 
-// Vocabulary + guards (the 14-tag `DbError` union, `isXxx` guards).
+// Vocabulary + guards (the 14-tag `DbError` union). Per-tag checks are the
+// classes' OWN static `is` — `UniqueViolation.is(e)` — so the classes export
+// as values; only the family predicates stay as functions.
 export {
   type DbError,
   type RetriedDbError,
-  isUniqueViolation,
-  isForeignKeyViolation,
-  isNotNullViolation,
-  isCheckViolation,
   isConstraintViolation,
-  isDataError,
-  isDeadlock,
-  isLockTimeout,
-  isTransactionAborted,
-  isConnectFailure,
-  isConnectionLost,
   isConnectionFailure,
-  isAuthenticationFailed,
-  isAuthorizationFailed,
-  isSqlSyntaxError,
-  isQueryFailure,
   isDbError,
   isRetriedError,
 } from "./tags.js";
 
-// Tag classes as types only — per-driver entry points build narrowed unions
-// with `Exclude<DbError, …>`; construct errors via `tryDb`, never by
-// instantiating these.
-export type {
+// Tag classes as values (the static `is` guard) — construct errors via
+// `tryDb`, never by instantiating these directly.
+export {
   UniqueViolation,
   ForeignKeyViolation,
   NotNullViolation,
   CheckViolation,
-  ConstraintViolation,
+  type ConstraintViolation,
   DataError,
   DeadlockError,
   LockTimeoutError,

@@ -97,61 +97,40 @@ export type DbError =
 
 // ─── Guards ──────────────────────────────────────────────────────────────────
 
-const tagOf = (e: unknown): string | undefined => {
-  if (typeof e !== "object" || e === null) return undefined;
-  const tag = Reflect.get(e, "_tag");
-  return typeof tag === "string" ? tag : undefined;
-};
+// Per-tag checks are the classes' OWN static `is` (inherited from
+// `TaggedErrorClass`) — `UniqueViolation.is(e)` narrows to `UniqueViolation`,
+// the same better-result idiom as `TaggedError.is` / `err.match`. Only the
+// FAMILY predicates (unions of tags) stay as functions, built on the statics.
 
-export const isUniqueViolation = (e: unknown): e is UniqueViolation =>
-  tagOf(e) === "db/unique-violation";
-export const isForeignKeyViolation = (e: unknown): e is ForeignKeyViolation =>
-  tagOf(e) === "db/foreign-key-violation";
-export const isNotNullViolation = (e: unknown): e is NotNullViolation =>
-  tagOf(e) === "db/not-null-violation";
-export const isCheckViolation = (e: unknown): e is CheckViolation =>
-  tagOf(e) === "db/check-violation";
+/** Family guard — any of the four constraint tags. */
 export const isConstraintViolation = (e: unknown): e is ConstraintViolation =>
-  isUniqueViolation(e) || isForeignKeyViolation(e) || isNotNullViolation(e) || isCheckViolation(e);
-export const isDataError = (e: unknown): e is DataError => tagOf(e) === "db/data-error";
-export const isDeadlock = (e: unknown): e is DeadlockError => tagOf(e) === "db/deadlock";
-export const isLockTimeout = (e: unknown): e is LockTimeoutError => tagOf(e) === "db/lock-timeout";
-export const isTransactionAborted = (e: unknown): e is TransactionAborted =>
-  tagOf(e) === "db/transaction-aborted";
-export const isConnectFailure = (e: unknown): e is ConnectFailure =>
-  tagOf(e) === "db/connect-failure";
-export const isConnectionLost = (e: unknown): e is ConnectionLost =>
-  tagOf(e) === "db/connection-lost";
+  UniqueViolation.is(e) ||
+  ForeignKeyViolation.is(e) ||
+  NotNullViolation.is(e) ||
+  CheckViolation.is(e);
 
 /** Family guard — either connection tag. `db/connect-failure` is a
  * connect-phase failure (safe to retry); `db/connection-lost` is ambiguous
  * mid-query loss (never auto-retried). */
 export const isConnectionFailure = (e: unknown): e is ConnectFailure | ConnectionLost =>
-  isConnectFailure(e) || isConnectionLost(e);
-export const isAuthenticationFailed = (e: unknown): e is AuthenticationFailed =>
-  tagOf(e) === "db/authentication-failed";
-export const isAuthorizationFailed = (e: unknown): e is AuthorizationFailed =>
-  tagOf(e) === "db/authorization-failed";
-export const isSqlSyntaxError = (e: unknown): e is SqlSyntaxError =>
-  tagOf(e) === "db/sql-syntax-error";
-export const isQueryFailure = (e: unknown): e is QueryFailure => tagOf(e) === "db/query-failure";
+  ConnectFailure.is(e) || ConnectionLost.is(e);
 
 /** True when `e` is any of the fourteen `DbError` tags — the boundary check. */
 export const isDbError = (e: unknown): e is DbError =>
-  isUniqueViolation(e) ||
-  isForeignKeyViolation(e) ||
-  isNotNullViolation(e) ||
-  isCheckViolation(e) ||
-  isDataError(e) ||
-  isDeadlock(e) ||
-  isLockTimeout(e) ||
-  isTransactionAborted(e) ||
-  isConnectFailure(e) ||
-  isConnectionLost(e) ||
-  isAuthenticationFailed(e) ||
-  isAuthorizationFailed(e) ||
-  isSqlSyntaxError(e) ||
-  isQueryFailure(e);
+  UniqueViolation.is(e) ||
+  ForeignKeyViolation.is(e) ||
+  NotNullViolation.is(e) ||
+  CheckViolation.is(e) ||
+  DataError.is(e) ||
+  DeadlockError.is(e) ||
+  LockTimeoutError.is(e) ||
+  TransactionAborted.is(e) ||
+  ConnectFailure.is(e) ||
+  ConnectionLost.is(e) ||
+  AuthenticationFailed.is(e) ||
+  AuthorizationFailed.is(e) ||
+  SqlSyntaxError.is(e) ||
+  QueryFailure.is(e);
 
 /** A `DbError` that survived its retries — carries the attempt count. */
 export type RetriedDbError = DbError & { retries: number };

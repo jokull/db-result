@@ -191,9 +191,8 @@ The blog (D1, async) is unaffected.
 
 **Status: OPEN.** The #7 `$inferInsert`/`Partial<I>` re-typing accepts only
 model values — raw drizzle's insert/update sources also permit
-`SQL | Placeholder` (and columns for update). `values({ id: sql\`...\` })` /
-`set({ count: sql\`...\` })` now fail. Fix: union each column type with
-drizzle's `SQL`/`Placeholder` while still filtering unknown keys.
+`SQL | Placeholder` (and columns for update). `values({ id: sql\`...\` })`/`set({ count: sql\`...\` })`now fail. Fix: union each column type with
+drizzle's`SQL`/`Placeholder` while still filtering unknown keys.
 
 ## 10. `selectDistinctOn` one-arg overload lost (codex P2, third pass)
 

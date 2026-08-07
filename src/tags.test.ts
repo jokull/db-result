@@ -2,18 +2,18 @@ import { describe, expect, test } from "bun:test";
 import {
   tryDb,
   isDbError,
-  isUniqueViolation,
+  UniqueViolation,
+  AuthenticationFailed,
+  AuthorizationFailed,
+  SqlSyntaxError,
+  QueryFailure,
   isConstraintViolation,
   isConnectionFailure,
   isRetriedError,
-  isAuthenticationFailed,
-  isAuthorizationFailed,
-  isSqlSyntaxError,
-  isQueryFailure,
 } from "./db-result.js";
 
 describe("guards", () => {
-  test("isUniqueViolation narrows correctly", async () => {
+  test("class statics narrow correctly (UniqueViolation.is)", async () => {
     const dupe = await tryDb(() => {
       throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
         code: "SQLITE_CONSTRAINT_UNIQUE",
@@ -26,16 +26,16 @@ describe("guards", () => {
       { retryTransient: false },
     );
     if (dupe.isErr()) {
-      expect(isUniqueViolation(dupe.error)).toBe(true);
+      expect(UniqueViolation.is(dupe.error)).toBe(true);
       expect(isConnectionFailure(dupe.error)).toBe(false);
-      if (isUniqueViolation(dupe.error)) expect(dupe.error.constraint).toContain("users");
+      if (UniqueViolation.is(dupe.error)) expect(dupe.error.constraint).toContain("users");
     }
     if (conn.isErr()) expect(isConnectionFailure(conn.error)).toBe(true);
     for (const g of [
-      isAuthenticationFailed,
-      isAuthorizationFailed,
-      isSqlSyntaxError,
-      isQueryFailure,
+      (e: unknown) => AuthenticationFailed.is(e),
+      (e: unknown) => AuthorizationFailed.is(e),
+      (e: unknown) => SqlSyntaxError.is(e),
+      (e: unknown) => QueryFailure.is(e),
     ]) {
       expect(g(null)).toBe(false);
     }

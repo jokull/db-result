@@ -105,17 +105,17 @@ ours. Details: [retry](./skills/db-result/references/retry.md).
 
 ## Guards
 
-Every tag has a predicate (`isUniqueViolation(e)`, `isQueryFailure(e)`, …) —
-the imperative alternative to folding. `isDataError`, `isDeadlock`,
-`isLockTimeout`, `isTransactionAborted`, `isConnectFailure`,
-`isConnectionLost` cover the data, contention, and connection tags.
+Every tag is a class, and the per-tag check is the class's own static `is` —
+`UniqueViolation.is(e)`, `QueryFailure.is(e)` — the same idiom as
+better-result's `TaggedError.is`. Classes are exported as values; construct
+errors via `tryDb`, never by instantiating them.
 Family guards group the tags most often folded together:
 `isConnectionFailure` is true for either connection tag (`db/connect-failure`
 or `db/connection-lost`); `isConstraintViolation` is true for any of the four
 constraint tags (`db/unique-violation`, `db/foreign-key-violation`,
 `db/not-null-violation`, `db/check-violation`) — the canonical "your input
 broke a schema rule" fold. When a fold sends each constraint tag to the same
-outcome, one guard check beats four identical match arms; when the arms
+outcome, one family guard check beats four `X.is` arms; when the arms
 diverge or read the error, `matchErrorPartial(error, folds, onUnhandled)` is
 the fold (handlers that read the error annotate the concrete class, per
 better-result's docs).
