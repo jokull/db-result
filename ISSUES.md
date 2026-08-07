@@ -175,35 +175,37 @@ Consumers: use `tryDb(rawDb…)` for fields projections until fixed.
 
 ## 8. Sync-backend transactions break atomicity (codex P1, third pass)
 
-**Status: OPEN — blocks release.** The wrapped `transaction` accepts a
+**Status: FIXED (`64f0236`) — was the release blocker.** The wrapped `transaction` accepts a
 `PromiseLike` callback unconditionally (`src/drizzle.ts` runtime passes an
 async callback). On SYNCHRONOUS backends (bun:sqlite, better-sqlite3) the
 driver commits when the callback returns its promise — the wrapped
 statements inside resolve AFTER the commit — a mid-transaction failure
-produces an outer `Err` with the earlier writes committed. The type must
-mirror the source db's transaction callback return (`D["transaction"]`
-constraint): async backends keep `PromiseLike`; sync backends force a sync
-callback (the wrapped surface's Promise-returning statements then become
-unusable inside a tx — effectively rejecting wrapped tx on sync drivers).
-The blog (D1, async) is unaffected.
+produces an outer `Err` with the earlier writes committed. The fix mirrors
+the source db's transaction callback return: async backends keep
+`PromiseLike`; sync backends force a sync callback with drizzle's own
+branded-rejection mechanic (`SyncTxError` — the wrapped surface's
+Promise-returning statements are unusable inside a wrapped tx, effectively
+rejecting it on sync drivers), plus a runtime guard that throws when a sync
+driver returns a promise callback by identity (it committed before the
+statements resolved). The blog (D1, async) is unaffected.
 
 ## 9. Expression-valued writes rejected (codex P2, third pass)
 
-**Status: OPEN.** The #7 `$inferInsert`/`Partial<I>` re-typing accepts only
+**Status: FIXED (`64f0236`).** The #7 `$inferInsert`/`Partial<I>` re-typing accepts only
 model values — raw drizzle's insert/update sources also permit
 `SQL | Placeholder` (and columns for update). `values({ id: sql\`...\` })`/`set({ count: sql\`...\` })`now fail. Fix: union each column type with
 drizzle's`SQL`/`Placeholder` while still filtering unknown keys.
 
 ## 10. `selectDistinctOn` one-arg overload lost (codex P2, third pass)
 
-**Status: OPEN.** The #4 fix dropped `| []`, but the mapped `infer A`
+**Status: FIXED (`64f0236`).** The #4 fix dropped `| []`, but the mapped `infer A`
 captures the LAST overload (the 2-arg pg form), so the valid
 `selectDistinctOn([users.id])` errors "Expected 2 arguments". Fix: preserve
 both overloads (make `fields` optional) without the zero-arg form.
 
 ## 11. `with` surface drops overloads and the table generic (codex P2, third pass)
 
-**Status: OPEN.** The mapped `with` surface erases drizzle's overloads and
+**Status: FIXED (`64f0236`).** The mapped `with` surface erases drizzle's overloads and
 the call-site table generic: `wrapped.with(cte).select()` requires fields;
 `wrapped.with(cte).insert(table).values(...)` exposes `values` as `never`
 (no `TTable` reaches `WrappedBuilder`). Fix: re-express the with factories
@@ -211,7 +213,7 @@ and thread the table like the top-level methods.
 
 ## 12. SQL Server `output` result types (codex P2, third pass)
 
-**Status: OPEN.** `db.insert(t).output().values(...)` resolves
+**Status: FIXED (`64f0236`).** `db.insert(t).output().values(...)` resolves
 `Result<never, …>` — only `returning` is reconstructed; mssql's `output`
 chain loses its executable result type. Fix: result tracking for `output`.
 
@@ -221,9 +223,13 @@ chain loses its executable result type. Fix: result tracking for `output`.
 
 The mapped-chain wrapper has a long regression tail: three codex passes over
 the same base surfaced 12 findings total (all type-surface except #8, which
-is a runtime atomicity issue on sync backends). #1-#7 are FIXED; #8-#12 are
-open. **0.1.1 remains blocked** — #8 must be resolved before release (the
-blog/D1 is async and unaffected, but the published surface is).
+was a runtime atomicity issue on sync backends). **All 12 are FIXED** —
+#1-#7 in `faf7613`/`bcb4ece`/`bdfb5d7`, #8-#12 in `64f0236`. The release
+blocker (#8, sync-tx atomicity) is resolved: the wrapped transaction mirrors
+the source db's async-ness, so wrapped tx on sync drivers is rejected at
+compile time (and guarded at runtime) instead of silently committing early.
+The blog (D1, async) is unaffected. Pending: re-run `codex review --base
+54bb02a` to confirm the closures before publish.
 
 ---
 
