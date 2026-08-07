@@ -18,19 +18,22 @@
  *
  * Sharp edges:
  *   - the wrapped CHAIN types are structural, not literal: mapping Drizzle's
- *     generic builder methods instantiates their type parameters, so chain
- *     row types degrade to `Record<string, any>`-shaped arrays. The union
- *     narrowing, retry, and Result discipline survive; row literals do not.
- *     For row-exact types, drop to `tryDb(builder)` — same retry, same
- *     narrowing, Drizzle's own types.
+ *     generic builder methods instantiates their type parameters, so the
+ *     PROJECTION forms degrade — `returning({ fields })` and relational
+ *     `findMany({ columns })`-with-extras can lose per-call row precision
+ *     (the zero-arg `returning()` and plain findMany/findFirst/findOne forms
+ *     are exact). For row-exact projection types, drop to `tryDb(builder)` —
+ *     same retry, same narrowing, Drizzle's own types.
  *   - `$with` and `refreshMaterializedView` pass through raw.
  *   - `values` accepts both the single-value and array forms (Drizzle
  *     overloads it; the mapped type would keep only the array form).
  *
- * The wrapper is structural over the db's own method signatures — no
- * drizzle-internal imports, so it works for every drizzle database (pg,
- * sqlite/D1, mysql, mssql). Type imports from drizzle are erased at build
- * time — the runtime bundle has no drizzle dependency.
+ * The wrapper is structural over the db's own method signatures, so it works
+ * for every drizzle database (pg, sqlite/D1, mysql, mssql). Type imports from
+ * drizzle's driver-agnostic root modules (`drizzle-orm/relations`,
+ * `drizzle-orm/utils`) re-express the relational methods with per-call
+ * precision — they are erased at build time, so the runtime bundle has no
+ * drizzle dependency.
  */
 import {
   tryDb,
@@ -43,6 +46,11 @@ import {
 } from "./db-result.js";
 import { isBuilder, wrapBuilder, type WrappedBuilder } from "./wrap.js";
 import type { Result } from "better-result";
+// Type-only imports from drizzle's driver-agnostic root modules (relations /
+// utils — not the pg/sqlite/mysql driver subpaths), used to re-express the
+// relational methods with per-call precision. Erased at build time.
+import type { BuildQueryResult, DBQueryConfig } from "drizzle-orm/relations";
+import type { KnownKeysOnly } from "drizzle-orm/utils";
 
 // ─── Type-level: the E-tracked surface ──────────────────────────────────────
 
@@ -70,6 +78,23 @@ type TransactionOf<D> = D extends {
   ? TX & AnyDrizzleDb
   : never;
 
+/** The db's relational query surface, resolved BEFORE the mapped wrap — a
+ * bare `D["query"]` indexed access inside the object type stays deferred
+ * under the native TypeScript compiler (tsgo), which defeats the
+ * generic-signature match in `RelationalMethod`; the conditional extraction
+ * forces resolution. */
+type QuerySurfaceOf<D> = D extends { query: infer Q } ? Q : never;
+
+/** The E-tracked relational query surface. `Q` is the db's query surface
+ * ALREADY extracted (`QuerySurfaceOf<D>`) — under tsgo, mapping over the db
+ * type directly (`keyof D["query"]` with D generic) keeps the per-key
+ * indexed access deferred, and the generic-signature match in
+ * `RelationalMethod` fails against the deferred type; mapping over the
+ * resolved surface forces eager per-key resolution. */
+type RelationalQueryOf<Q, E extends DbError, L extends ShapeLedger> = {
+  [T in keyof Q]: WrapRelational<Q[T], E, L>;
+};
+
 /** Relational reads are SELECTs — the read-shape exclusions apply (respecting
  * the driver's ledger). */
 type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
@@ -80,12 +105,44 @@ type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
 /** Wraps a relational query surface: promise-returning methods (`findMany` /
  * `findFirst` / `findOne`) resolve `Result<T, readE>`; `$dynamic`-style
  * methods that return builders are wrapped recursively. */
+
+/** Per-call relational precision. Drizzle's generic methods compute the
+ * result from the CALL's config (`BuildQueryResult<TSchema, TFields,
+ * TConfig>`), so the mapped capture — which instantiates the generic at its
+ * constraint — would claim the FULL row for `columns`/`with` projections.
+ * Instead: the method's type parameter cannot be inferred from the
+ * constraint position (`infer C` comes back `unknown`), but the params'
+ * `KnownKeysOnly<TConfig, C>` captures the EXACT constraint with its type
+ * arguments concrete — extract TSchema/TFields and the many/one mode from
+ * it, re-declare the generic, and recompute `BuildQueryResult` per call.
+ * Non-matching methods (duck surfaces, `$dynamic`) resolve to `never` and
+ * fall back to the mapped arms below. */
+type RelationalMethod<R, E extends DbError, L extends ShapeLedger> =
+  R extends <_TConfig extends infer _C>(config?: infer A) => PromiseLike<infer _R>
+    ? A extends KnownKeysOnly<infer C, any>
+      ? C extends DBQueryConfig<infer Mode, infer TSchema, infer TFields>
+        ? <TConfig extends C>(
+            config?: KnownKeysOnly<TConfig, C>,
+          ) => Promise<
+            Result<
+              Mode extends "one"
+                ? BuildQueryResult<TSchema, TFields, TConfig> | undefined
+                : BuildQueryResult<TSchema, TFields, TConfig>[],
+              RelationalReadE<E, L>
+            >
+          >
+        : never
+      : never
+    : never;
+
 type WrapRelational<R, E extends DbError, L extends ShapeLedger> = {
-  [K in keyof R]: R[K] extends (...args: infer A) => PromiseLike<infer T>
-    ? (...args: A) => Promise<Result<Awaited<T>, RelationalReadE<E, L>>>
-    : R[K] extends (...args: infer A) => infer RB
-      ? (...args: A) => WrapRelational<RB, E, L>
-      : R[K];
+  [K in keyof R]: RelationalMethod<R[K], E, L> extends never
+    ? R[K] extends (...args: infer A) => PromiseLike<infer T>
+      ? (...args: A) => Promise<Result<Awaited<T>, RelationalReadE<E, L>>>
+      : R[K] extends (...args: infer A) => infer RB
+        ? (...args: A) => WrapRelational<RB, E, L>
+        : R[K]
+    : RelationalMethod<R[K], E, L>;
 };
 
 /** The E-tracked drizzle db surface — structural over the db's OWN method
@@ -102,7 +159,7 @@ export type DrizzleTryDb<
     ...args: Parameters<D["selectDistinct"]> | []
   ) => WrappedBuilder<ReturnType<D["selectDistinct"]>, E, L>;
   selectDistinctOn: D["selectDistinctOn"] extends (...args: infer A) => infer B
-    ? (...args: A | []) => WrappedBuilder<B, E, L>
+    ? (...args: A) => WrappedBuilder<B, E, L>
     : never;
   insert: <TTable extends { $inferSelect: unknown }>(
     table: TTable,
@@ -118,7 +175,7 @@ export type DrizzleTryDb<
     ...rest: D["transaction"] extends (cb: any, ...rest2: infer R) => any ? R : never[]
   ): Promise<Result<T, E>>;
   execute: D["execute"] extends (...args: infer A) => infer R
-    ? (...args: A | []) => Promise<Result<Awaited<R>, E>>
+    ? (...args: A) => Promise<Result<Awaited<R>, E>>
     : never;
   with: D["with"] extends (...args: infer A) => infer W
     ? (...args: A) => {
@@ -127,9 +184,7 @@ export type DrizzleTryDb<
           : W[K];
       }
     : never;
-  query: D["query"] extends object
-    ? { [T in keyof D["query"]]: WrapRelational<D["query"][T], E, L> }
-    : {};
+  query: RelationalQueryOf<QuerySurfaceOf<D>, E, L>;
 } & {
   [K in keyof D as K extends
     | "select"

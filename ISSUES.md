@@ -18,13 +18,13 @@ method and the inference was doubly unusable —
 1. `A` came back `[]` (inference from the first overload), so **zero-arg
    calls matched the fields arm** instead of the all-columns arm.
 2. `R` carried **unresolved polymorphic `this`** (`SQLiteInsertReturning<this,
-   …>`), so `ExecR`'s `_`-slot branch failed and it fell through to the
+…>`), so `ExecR`'s `_`-slot branch failed and it fell through to the
    `execute` return (the run result: `Changes` / `{[x: string]: unknown}[]`).
 
 Worse, the intermediate builders' `_` slots **don't carry the table at all**:
 drizzle's `values()` returns a 3-arg
 `SQLiteInsertBase<TTable, TResultType, TRunResult>` whose first generic is
-the *table*, not the HKT (a constraint-violating instantiation), so a
+the _table_, not the HKT (a constraint-violating instantiation), so a
 builder-side `ReturningAll<B>` reconstruction also failed — `B extends
 { _: { table: … } }` never matched.
 
@@ -45,22 +45,51 @@ wrapped `db` (not yet migrated).
 
 ## 2. Relational projections claim runtime-absent fields (codex P1)
 
-**Severity: should fix before release** (a type LIE — the same family as #1).
+**Status: FIXED** — the relational methods re-express drizzle's generic
+signature so `columns`/`with` projections resolve per-call (verified in the
+repo's `types.test-d.ts` and on the blog's real D1 surface:
+`findMany({ columns: { slug, publishedAt, modifiedAt } })` →
+`Result<{ slug: string; publishedAt: Date; modifiedAt: Date | null }[], E>`).
 
-**Symptom:** `db.query.posts.findMany({ columns: { slug: true } })` types the
-Ok rows as the FULL table shape (with `title` present) even though drizzle
-omits it at runtime. Consumers can read fields that are absent.
+**Root cause:** the mapped conditional `R[K] extends (...args: infer A) =>
+PromiseLike<infer T>` captures `T` from the generic method **instantiated at
+its constraint** — the per-call config never reaches the Ok type.
 
-**Root cause** (`src/drizzle.ts`, `WrapRelational` ~line 83): the mapped
-conditional `R[K] extends (...args: infer A) => PromiseLike<infer T>` captures
-`T` from the generic method **instantiated at its constraint** — the
-per-call `columns`/`with` config never reaches the Ok type.
+**Fix** (`src/drizzle.ts`, `RelationalMethod`): a generic method's type
+parameter cannot be inferred from its constraint position (`infer C` comes
+back `unknown`), but the params' `KnownKeysOnly<TConfig, C>` captures the
+EXACT constraint with its type arguments concrete. Extract TSchema/TFields
+and the many/one mode from it, re-declare the generic, and recompute
+`BuildQueryResult` per call:
 
-**Fix direction:** preserve the relational method's per-call generic return
-(mirror the #1 lesson: thread what the call site knows, or re-select
-drizzle's own generic overload instead of the constraint-instantiated one).
-Structural reconstruction of `SelectResultFields` is not viable — this needs
-drizzle's own types at the call.
+```ts
+A extends KnownKeysOnly<infer C, any>
+  ? C extends DBQueryConfig<infer Mode, infer TSchema, infer TFields>
+    ? <TConfig extends C>(config?: KnownKeysOnly<TConfig, C>) => Promise<
+        Result<
+          Mode extends "one"
+            ? BuildQueryResult<TSchema, TFields, TConfig> | undefined
+            : BuildQueryResult<TSchema, TFields, TConfig>[],
+          RelationalReadE<E, L>
+        >
+      >
+    : never
+  : never
+```
+
+The mapping lives in a top-level `RelationalQueryOf<Q, E, L>` over the
+extracted `QuerySurfaceOf<D>` — under the native TS compiler (tsgo) an inline
+per-key mapping inside the instantiated db object keeps the per-table indexed
+access deferred and the generic-signature match fails.
+
+**tsgo + symlinked packages:** a separate landmine found during verification —
+with the blog's `file:` symlink to the repo, tsgo resolves the dist's
+`drizzle-orm/relations` imports from the dist's REALPATH (the repo's install)
+instead of the symlink path (the consumer's install), producing a different
+module identity than the consumer's method types and silently defeating the
+constraint match (`tsc` 5.9 resolves via the symlink path and is unaffected).
+Consumers on tsgo need a REAL install (tarball or `install-links`) — the
+blog's `file:` dev link must be replaced once the migration settles.
 
 ---
 
@@ -114,7 +143,7 @@ that can never happen at runtime.
 
 **Fix direction:** mirror Kysely's conditional terminal result instead of
 `O | undefined` — the `| undefined` belongs only on select-shaped builders
-(and on returning-less mutations the *run* result, not `undefined`).
+(and on returning-less mutations the _run_ result, not `undefined`).
 
 ---
 
@@ -154,7 +183,7 @@ surface with per-call probes.
 ## Polymorphic `this` poisons inferred returns
 
 A method returning `SQLiteInsertReturning<this, …>` captured via `infer R`
-*outside the class* keeps `this` unresolved, so every `this`-indexed member
+_outside the class_ keeps `this` unresolved, so every `this`-indexed member
 (`_` slot included) is inaccessible and conditional branches silently fall
 through (our `ExecR` fell to the execute branch). Reconstruction must come
 from a **concrete** type — thread the table from the call site, never re-derive
@@ -163,7 +192,7 @@ it from the builder's internals.
 ## Drizzle rc.4's intermediate builders drop their `_` slots
 
 `values()` returns a 3-arg `SQLiteInsertBase<TTable, TResultType, TRunResult>`
-— the HKT slot is filled with the *table* (a constraint-violating
+— the HKT slot is filled with the _table_ (a constraint-violating
 instantiation), so `B["_"]` no longer resolves on intermediates. Only the
 entry builder and the final returning builder have usable slots. Never assume
 an intermediate's `_` survives.
@@ -183,6 +212,30 @@ an intermediate's `_` survives.
   LSP hover on the call site → the ORM's source (the fork, not the minified
   d.ts).
 
+## The constraint-capture trick (generic-method precision)
+
+A generic method's type parameter cannot be inferred from its constraint
+position (`F extends <T extends infer C>(...) => ...` gives `C = unknown`),
+but the params often reference the constraint in a wrapper type —
+drizzle's `config?: KnownKeysOnly<TConfig, Constraint>` — and the SECOND type
+argument captures the constraint EXACTLY, with its type arguments concrete.
+Extract the schema args and the result mode from it, re-declare the generic,
+and recompute the result per call. This is the general form of the #1
+"thread what the call site knows" lesson, for methods you cannot re-express
+structurally.
+
+## tsgo resolves symlinked packages from the realpath
+
+The native TS compiler resolves a symlinked package's import of a
+peer-dependency from the DIST FILE'S REALPATH (the linked repo's install),
+not the symlink path (the consumer's install). Same package version, byte
+-identical d.ts — but a DIFFERENT MODULE IDENTITY — so structural matches
+that depend on the type's origin (generic-signature inference through an
+imported type) silently fail while `tsc` 5.9 (symlink-path resolution) and
+any real install pass. Symptom: a lib's types degrade to fallbacks only
+under `tsgo` + `file:`-linked deps. Fix: real installs (`npm pack` + install,
+or `install-links`); verify consumer typechecks with a tarball, not a link.
+
 ## Fold idiom judgment
 
 better-result has **no multi-tag primitive** (full API scan: `matchError` /
@@ -199,5 +252,5 @@ cause` beats N identical arms.
   is a "don't publish" or "documented sharp edge" decision, made explicit.
 - Don't tag/publish until the user says the work is done — a premature tag
   gets force-moved, but the noise costs a reset cycle.
-- The LSP hover verification of the blog's wrapped chains is what *surfaced*
+- The LSP hover verification of the blog's wrapped chains is what _surfaced_
   this blocker — the "verify the heavy lifting" exercise earns its keep.

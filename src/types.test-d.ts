@@ -42,12 +42,15 @@ import type {
   Kysely,
   SelectQueryBuilder,
   InsertQueryBuilder,
+  InsertResult,
   UpdateQueryBuilder,
   DeleteQueryBuilder,
   MergeQueryBuilder,
   RawBuilder,
   NoResultError,
   QueryNode,
+  ExecuteTakeFirstOrThrowOptions,
+  UpdateResult,
 } from "kysely";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -413,9 +416,15 @@ type _kt8 = Assert<Member<Fk, ErrOfPromise<typeof ktfoDel>> extends true ? true 
 type _kt9 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoUpd>> extends true ? true : false>;
 
 // write families keep `executeTakeFirst` too (raw Kysely has it on every
-// executable builder — the mapped type must not remove it).
+// executable builder — the mapped type must not remove it). ISSUES.md #5:
+// non-returning mutation terminals resolve the MUTATION result — never
+// `undefined` (Kysely's SimplifySingleResult excludes it for the four
+// result types).
 type _kt10 = Assert<
-  Member<undefined, OkOf<ReturnType<typeof kins.executeTakeFirst>>> extends true ? true : false
+  Absent<undefined, OkOf<ReturnType<typeof kins.executeTakeFirst>>> extends true ? true : false
+>;
+type _kt10b = Assert<
+  Same<OkOf<ReturnType<typeof kins.executeTakeFirst>>, InsertResult> extends true ? true : false
 >;
 type _kt11 = Assert<
   Member<Unique, ErrOf<ReturnType<typeof kins.executeTakeFirst>>> extends true ? true : false
@@ -448,6 +457,23 @@ class Missing extends Error {
 }
 const ktfClass = ksel.executeTakeFirstOrThrow({ errorConstructor: Missing });
 type _kt16 = Assert<Member<Missing, ErrOfPromise<typeof ktfClass>> extends true ? true : false>;
+
+// ISSUES.md #3 (codex P2): a variable TYPED `ExecuteTakeFirstOrThrowOptions`
+// carries the optional errorConstructor — the union must resolve honestly to
+// the broad Error contract instead of silently falling back to NoResultError.
+const ktOpts: ExecuteTakeFirstOrThrowOptions = { errorConstructor: () => new Gone("gone") };
+const ktfVar = ksel.executeTakeFirstOrThrow(ktOpts);
+type _kt17 = Assert<Same<ErrOfPromise<typeof ktfVar>, Error> extends true ? true : false>;
+
+// ISSUES.md #5 (codex P2): the update terminal's Ok is the RESULT type, not
+// the table union — UpdateQueryBuilder has FOUR type params, and the mapped
+// type must not bind the 3rd (table) into the result slot.
+type _kt18 = Assert<
+  Same<OkOf<ReturnType<typeof kupd.executeTakeFirst>>, UpdateResult> extends true ? true : false
+>;
+type _kt19 = Assert<
+  Absent<undefined, OkOf<ReturnType<typeof kupd.executeTakeFirst>>> extends true ? true : false
+>;
 
 // ─── relational queries — the read-shape E-track (sqlite db, blog pattern) ─
 
@@ -501,6 +527,34 @@ type _rel3 = Assert<Member<undefined, OkOfPromise<typeof relMany>> extends true 
 const relOne = wrappedSqlite.query.rPosts.findFirst({ where: { slug: "x" } });
 type _rel4 = Assert<Member<undefined, OkOfPromise<typeof relOne>> extends true ? true : false>;
 type _rel5 = Assert<Absent<Unique, ErrOfPromise<typeof relOne>> extends true ? true : false>;
+
+// ISSUES.md #2 (codex P1): projections keep per-call precision — the wrapped
+// surface matches drizzle's own BuildQueryResult for columns/with, and
+// findFirst carries the absent-row undefined.
+const relProjRaw = sdb.query.rPosts.findMany({ columns: { slug: true } });
+type _relProjRaw = Assert<
+  Same<Awaited<typeof relProjRaw>, { slug: string }[]> extends true ? true : false
+>;
+const relProj = wrappedSqlite.query.rPosts.findMany({ columns: { slug: true } });
+type _relProj0 = Assert<
+  Same<OkOfPromise<typeof relProj>, { slug: string }[]> extends true ? true : false
+>;
+type _relProj1 = Assert<
+  Member<{ title: string | null }, OkOfPromise<typeof relProj>> extends true ? false : true
+>;
+const relWith = wrappedSqlite.query.rPosts.findMany({ with: { comments: true } });
+type _relWith0 = Assert<
+  Same<
+    OkOfPromise<typeof relWith>,
+    { slug: string; title: string | null; comments: { id: number; postSlug: string | null }[] }[]
+  > extends true
+    ? true
+    : false
+>;
+const relFirstProj = wrappedSqlite.query.rPosts.findFirst({ columns: { slug: true } });
+type _relFirst0 = Assert<
+  Same<OkOfPromise<typeof relFirstProj>, { slug: string } | undefined> extends true ? true : false
+>;
 
 // ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
 import { prismaTryDb } from "./prisma.ts";
