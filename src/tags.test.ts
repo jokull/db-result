@@ -3,6 +3,7 @@ import {
   tryDb,
   isDbError,
   isUniqueViolation,
+  isConstraintViolation,
   isConnectionFailure,
   isRetriedError,
   isAuthenticationFailed,
@@ -38,6 +39,42 @@ describe("guards", () => {
     ]) {
       expect(g(null)).toBe(false);
     }
+  });
+
+  test("isConstraintViolation groups the four constraint tags", async () => {
+    const dupe = await tryDb(() => {
+      throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+        code: "SQLITE_CONSTRAINT_UNIQUE",
+      });
+    });
+    const fk = await tryDb(() => {
+      throw Object.assign(new Error("FOREIGN KEY constraint failed"), {
+        code: "SQLITE_CONSTRAINT_FOREIGNKEY",
+      });
+    });
+    const notNull = await tryDb(() => {
+      throw Object.assign(new Error("NOT NULL constraint failed: posts.title"), {
+        code: "SQLITE_CONSTRAINT_NOTNULL",
+      });
+    });
+    const check = await tryDb(() => {
+      throw Object.assign(new Error("CHECK constraint failed"), {
+        code: "SQLITE_CONSTRAINT_CHECK",
+      });
+    });
+    const qf = await tryDb(() => {
+      throw Object.assign(new Error("database or disk is full"));
+    });
+    if (dupe.isErr()) {
+      expect(isConstraintViolation(dupe.error)).toBe(true);
+      if (isConstraintViolation(dupe.error)) expect(dupe.error.constraint).toContain("users");
+    }
+    if (fk.isErr()) expect(isConstraintViolation(fk.error)).toBe(true);
+    if (notNull.isErr()) expect(isConstraintViolation(notNull.error)).toBe(true);
+    if (check.isErr()) expect(isConstraintViolation(check.error)).toBe(true);
+    if (qf.isErr()) expect(isConstraintViolation(qf.error)).toBe(false);
+    expect(isConstraintViolation(null)).toBe(false);
+    expect(isConstraintViolation(new TypeError("boom"))).toBe(false);
   });
 
   test("isDbError is the boundary check across the whole union", async () => {

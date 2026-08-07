@@ -40,6 +40,14 @@ export class CheckViolation extends TaggedError("db/check-violation")<{
   constraint: string;
   potentiallyTransient?: boolean;
 }> {}
+
+/** The four SQL constraint-violation tags — the "your input broke a schema rule" family. */
+export type ConstraintViolation =
+  | UniqueViolation
+  | ForeignKeyViolation
+  | NotNullViolation
+  | CheckViolation;
+
 export class DataError extends TaggedError("db/data-error")<{
   potentiallyTransient?: boolean;
 }> {}
@@ -103,6 +111,8 @@ export const isNotNullViolation = (e: unknown): e is NotNullViolation =>
   tagOf(e) === "db/not-null-violation";
 export const isCheckViolation = (e: unknown): e is CheckViolation =>
   tagOf(e) === "db/check-violation";
+export const isConstraintViolation = (e: unknown): e is ConstraintViolation =>
+  isUniqueViolation(e) || isForeignKeyViolation(e) || isNotNullViolation(e) || isCheckViolation(e);
 export const isDataError = (e: unknown): e is DataError => tagOf(e) === "db/data-error";
 export const isDeadlock = (e: unknown): e is DeadlockError => tagOf(e) === "db/deadlock";
 export const isLockTimeout = (e: unknown): e is LockTimeoutError => tagOf(e) === "db/lock-timeout";
