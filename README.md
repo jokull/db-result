@@ -171,29 +171,82 @@ the safe subset.
 
 ## Shape-aware types — the union narrows itself
 
-`tryDb` reads the thunk's **parameter type** as evidence of what the query can and
-cannot do, and narrows the error union to what that shape can actually produce.
-Declare the parameter; the impossible tags compile out:
+`tryDb` reads the thunk's **parameter type** as structural evidence of what the
+query can and cannot do — and narrows the error union to exactly what that shape
+can produce. Declare the parameter; the impossible tags compile out. Hover the
+result: the compiler spells out a different union per shape, for free:
 
 ```ts
-// a transaction client: begin succeeded → authn/connect-failure impossible
-tryDb((tx: Transaction<DB>) => tx.insertInto("users").values({ email }).execute());
-//                                  ^ Result<T, DbError minus {authn, connect-failure}>
+import type { SelectQueryBuilder, Transaction, DeleteQueryBuilder } from "kysely";
+import { tryDb, matchErrorPartial } from "db-result"; // + better-result
 
-// a select builder: constraints are write-only → gone from the union
+interface DB {
+  users: { id: number; email: string; name: string };
+}
+
+// 1. zero-arg thunk: no evidence — everything is possible
+tryDb(() => db.selectFrom("users").selectAll().execute());
+//   ^? Promise<Result<User[], DbError>>           — all 14 tags
+
+// 2. a select builder: constraints are write-only — four tags + tx-aborted gone
 tryDb((q: SelectQueryBuilder<DB, "users", {}>) => db.selectFrom("users").selectAll().execute());
-//                                  ^ Result<T, DbError minus {4 constraints, tx-aborted}>
+//   ^? Promise<Result<User[], DbError minus {
+//        db/unique-violation | db/foreign-key-violation | db/not-null-violation
+//      | db/check-violation | db/transaction-aborted }>
+//   deadlock stays (SELECT … FOR UPDATE); data-error stays (read conversions)
 
-// a delete builder: FK is the only constraint a DELETE can hit
+// 3. a transaction client: the callback ran after acquire + BEGIN —
+//    authn/connect-failure are impossible, and statement auto-retry turns off
+tryDb((tx: Transaction<DB>) => tx.insertInto("users").values({ email }).execute());
+//   ^? Promise<Result<…, DbError minus {
+//        db/authentication-failed | db/connect-failure }>
+
+// 4. a delete builder: FK is the only constraint a DELETE can hit
 tryDb((q: DeleteQueryBuilder<DB, "users", {}>) =>
-  db.deleteFrom("users").where("id", "=", 1).execute(),
+  q.deleteFrom("users").where("id", "=", id).execute(),
+);
+//   ^? Promise<Result<…, DbError minus {
+//        db/unique-violation | db/not-null-violation | db/check-violation
+//      | db/transaction-aborted }>                 — foreign-key-violation survives
+```
+
+Then fold it — and the terminal only lists what's genuinely left:
+
+```ts
+return matchErrorPartial(
+  outcome.error, // the narrowed union from shape 2 above
+  { "db/unique-violation": (e) => c.json({ error: "email_taken" }, 409) },
+  (unhandled) => {
+    // the compiler's exhaustive list, nothing more:
+    //   db/deadlock | db/lock-timeout | db/data-error | db/connect-failure |
+    //   db/connection-lost | db/authentication-failed | db/authorization-failed |
+    //   db/sql-syntax-error | db/query-failure
+    reportError(unhandled);
+    return c.json({ error: "internal" }, 500);
+  },
 );
 ```
 
-Zero runtime cost — the probes compile away. A one-arg thunk whose parameter proves
-no shape is a compile error on purpose: the lattice never silently degrades to the
-full union. The full lattice (Kysely/Drizzle/Prisma probes, per-driver ledgers, the
-"reads that write" footgun, the honest ceilings) is in
+The lattice knows your ORM _and_ your driver. Kysely builders, Drizzle
+builders, Prisma args objects — each probed structurally, no imports, zero
+runtime cost (the probes compile away). Prisma args are the subtle one:
+`{ take, orderBy }` is provably a read, while `{ where }`-only args (shared by
+`findUnique` and `delete`) narrow to the delete set — FK stays, because
+delete/deleteMany can FK-fail. And `db-result/sqlite` keeps `connect-failure`
+inside transactions on purpose: a SQLite tx can still `ATTACH DATABASE`, which
+fires CANTOPEN mid-query — the lattice refuses to lie.
+
+**It refuses to guess.** A one-arg thunk whose parameter proves no shape is a
+compile error — no silent widening to the full union:
+
+```ts
+tryDb((client: { selectFrom(): unknown }) => …); // ✗ no overload matches
+// use the zero-arg form instead of guessing
+```
+
+The full lattice — every probe, the per-driver ledgers, the "reads that write"
+footgun (DML CTEs can still violate constraints — the runtime classifies them
+correctly, they just fall to the terminal), the honest ceilings — lives in
 [`references/shapes.md`](skills/db-result/references/shapes.md).
 
 ---
