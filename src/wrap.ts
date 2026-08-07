@@ -71,13 +71,18 @@ export const wrapBuilder = (
       }
       if (key === "then" || key === "catch" || key === "finally") {
         // The wrapped Result is promise-shaped; re-route the protocol method.
-        const resultPromise = wrapExecute(() => executable.execute()) as unknown as Record<
-          string,
-          (...a: unknown[]) => unknown
-        >;
-        return (...args: unknown[]) => resultPromise[key]!(...args);
+        // Construction is deferred to the CALL: property inspection alone
+        // (thenability checks, spreads, util.inspect) must never execute the
+        // query — only invoking the promise method may.
+        return (...args: unknown[]) => {
+          const resultPromise = wrapExecute(() => executable.execute()) as unknown as Record<
+            string,
+            (...a: unknown[]) => unknown
+          >;
+          return resultPromise[key]!(...args);
+        };
       }
-      if (terminals && typeof key === "string" && key in terminals) {
+      if (terminals && typeof key === "string" && Object.hasOwn(terminals, key)) {
         return (...args: unknown[]) => terminals[key]!(target, args);
       }
       const value = Reflect.get(target, key);

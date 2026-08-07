@@ -82,4 +82,35 @@ describe("kyselyTryDb — E-tracked takeFirst terminals", () => {
     expect(result.isOk()).toBe(true);
     expect(attempts).toBe(3);
   });
+
+  test("inspecting then/catch/finally does NOT execute the query", async () => {
+    let executed = 0;
+    const db = {
+      selectFrom: () => ({
+        execute: async () => {
+          executed += 1;
+          return [];
+        },
+        executeTakeFirst: async () => undefined,
+        toOperationNode: () => node,
+      }),
+    };
+    const builder = wrapped(db).selectFrom("users");
+    // property inspection only — thenability checks, spreads, util.inspect
+    expect(typeof builder.then).toBe("function");
+    expect(typeof builder.catch).toBe("function");
+    expect(executed).toBe(0);
+    await builder; // invoking the promise protocol is what executes
+    expect(executed).toBe(1);
+  });
+
+  test("Object.prototype members pass through (no terminal dispatch on inherited keys)", async () => {
+    const builder = wrapped(makeDb({ id: 1 })).selectFrom("users");
+    expect(typeof builder.constructor).toBe("function");
+    expect(typeof builder.hasOwnProperty).toBe("function");
+    expect(builder.hasOwnProperty("execute")).toBe(true);
+    expect(Object.hasOwn(builder, "then")).toBe(false);
+    const result = await builder.executeTakeFirst();
+    expect(result.isOk()).toBe(true); // terminals still dispatch on own keys
+  });
 });

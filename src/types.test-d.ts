@@ -47,6 +47,7 @@ import type {
   MergeQueryBuilder,
   RawBuilder,
   NoResultError,
+  QueryNode,
 } from "kysely";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -68,6 +69,9 @@ type Same<U, V> = [U] extends [V] ? ([V] extends [U] ? true : false) : false;
 
 /** The error union of a `tryDb` call: `Promise<Result<T, E>>` → `E`. */
 type ErrOf<R> = R extends Promise<Result<unknown, infer E>> ? E : never;
+
+/** The error union of a Result promise VALUE (already-called method). */
+type ErrOfPromise<R> = R extends Promise<Result<unknown, infer E>> ? E : never;
 
 /** The ok value of a `Result` promise: `Promise<Result<T, E>>` → `T`. */
 type OkOf<R> = R extends Promise<Result<infer T, unknown>> ? T : never;
@@ -392,30 +396,55 @@ type _kt3 = Assert<
     ? true
     : false
 >;
-type _kt4 = Assert<
-  Member<NoResultError, ErrOf<ReturnType<typeof ksel.executeTakeFirstOrThrow>>> extends true
-    ? true
-    : false
+// takeFirstOrThrow is generic over the options, so `ReturnType` on the method
+// degrades the union (O2 uninstantiated) — assert on REAL calls instead.
+const ktfoSel = ksel.executeTakeFirstOrThrow();
+const ktfoIns = kins.executeTakeFirstOrThrow();
+const ktfoDel = kdel.executeTakeFirstOrThrow();
+const ktfoUpd = kupd.executeTakeFirstOrThrow();
+type _kt4 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoSel>> extends true ? true : false>;
+type _kt5 = Assert<Member<Unique, ErrOfPromise<typeof ktfoIns>> extends true ? true : false>;
+type _kt6 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoIns>> extends true ? true : false>;
+type _kt7 = Assert<Absent<Unique, ErrOfPromise<typeof ktfoDel>> extends true ? true : false>;
+type _kt8 = Assert<Member<Fk, ErrOfPromise<typeof ktfoDel>> extends true ? true : false>;
+type _kt9 = Assert<Member<NoResultError, ErrOfPromise<typeof ktfoUpd>> extends true ? true : false>;
+
+// write families keep `executeTakeFirst` too (raw Kysely has it on every
+// executable builder — the mapped type must not remove it).
+type _kt10 = Assert<
+  Member<undefined, OkOf<ReturnType<typeof kins.executeTakeFirst>>> extends true ? true : false
 >;
-type _kt5 = Assert<
-  Member<Unique, ErrOf<ReturnType<typeof kins.executeTakeFirstOrThrow>>> extends true ? true : false
+type _kt11 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof kins.executeTakeFirst>>> extends true ? true : false
 >;
-type _kt6 = Assert<
-  Member<NoResultError, ErrOf<ReturnType<typeof kins.executeTakeFirstOrThrow>>> extends true
-    ? true
-    : false
+type _kt12 = Assert<
+  Member<Fk, ErrOf<ReturnType<typeof kdel.executeTakeFirst>>> extends true ? true : false
 >;
-type _kt7 = Assert<
-  Absent<Unique, ErrOf<ReturnType<typeof kdel.executeTakeFirstOrThrow>>> extends true ? true : false
+type _kt13 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof kdel.executeTakeFirst>>> extends true ? true : false
 >;
-type _kt8 = Assert<
-  Member<Fk, ErrOf<ReturnType<typeof kdel.executeTakeFirstOrThrow>>> extends true ? true : false
->;
-type _kt9 = Assert<
-  Member<NoResultError, ErrOf<ReturnType<typeof kupd.executeTakeFirstOrThrow>>> extends true
-    ? true
-    : false
->;
+
+// a custom errorConstructor replaces NoResultError in the error union — the
+// union is honest about the constructor's own error type.
+class Gone extends Error {
+  readonly kind = "gone" as const; // structural marker: bare Error subclasses
+  // are assignable to each other, which would defeat the Absent asserts
+}
+const ktfGone = ksel.executeTakeFirstOrThrow({ errorConstructor: () => new Gone("gone") });
+// soundness (codex finding): the custom ctor's own error type IS in the
+// union (and NoResultError is not — the union is precise), so exhaustive
+// consumers narrow to it instead of assuming NoResultError.
+type _kt14 = Assert<Member<Gone, ErrOfPromise<typeof ktfGone>> extends true ? true : false>;
+type _kt15 = Assert<Absent<Unique, ErrOfPromise<typeof ktfGone>> extends true ? true : false>;
+class Missing extends Error {
+  readonly node: unknown = null;
+  constructor(node: QueryNode) {
+    super("no result");
+    this.node = node;
+  }
+}
+const ktfClass = ksel.executeTakeFirstOrThrow({ errorConstructor: Missing });
+type _kt16 = Assert<Member<Missing, ErrOfPromise<typeof ktfClass>> extends true ? true : false>;
 
 // ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
 

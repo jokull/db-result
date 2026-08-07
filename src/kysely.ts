@@ -54,6 +54,7 @@ import {
   type AbortableQueryOptions,
   type ExecuteTakeFirstOrThrowOptions,
   type MergeQueryBuilder,
+  type NoResultErrorConstructor,
   type QueryNode,
 } from "kysely";
 import type {
@@ -112,11 +113,34 @@ type TakeFirstFn<O, B, E extends DbError, L extends ShapeLedger> = (
   options?: AbortableQueryOptions,
 ) => Promise<Result<O | undefined, ShapeUnion<E, L, B>>>;
 
+/** The no-result error a call can produce: the caller's `errorConstructor`
+ * return/instance type when supplied, else `NoResultError` — the union is
+ * honest about custom constructors so exhaustive consumers never treat a
+ * custom error as a `NoResultError`. */
+type NoResultErrorFor<O> = [O] extends [never | undefined]
+  ? NoResultError
+  : O extends { errorConstructor: infer C }
+    ? C extends NoResultErrorConstructor
+      ? InstanceType<C>
+      : C extends (node: QueryNode) => infer R
+        ? R
+        : NoResultError
+    : O extends NoResultErrorConstructor
+      ? InstanceType<O>
+      : O extends (node: QueryNode) => infer R
+        ? R
+        : NoResultError;
+
 /** E-tracked `executeTakeFirstOrThrow`: no row resolves `Err(NoResultError)`
- * (or the caller's `errorConstructor`) instead of throwing. */
-type TakeFirstOrThrowFn<O, B, E extends DbError, L extends ShapeLedger> = (
-  options?: ExecuteTakeFirstOrThrowOptions | ExecuteTakeFirstOrThrowOptions["errorConstructor"],
-) => Promise<Result<O, ShapeUnion<E, L, B> | NoResultError>>;
+ * — or the caller's `errorConstructor` — instead of throwing. */
+type TakeFirstOrThrowFn<O, B, E extends DbError, L extends ShapeLedger> = <
+  O2 extends
+    | ExecuteTakeFirstOrThrowOptions
+    | ExecuteTakeFirstOrThrowOptions["errorConstructor"]
+    | undefined = undefined,
+>(
+  options?: O2,
+) => Promise<Result<O, ShapeUnion<E, L, B> | NoResultErrorFor<O2>>>;
 
 /** Re-adds the overloaded chain forms the mapped type drops, per builder
  * family. Returns `WrappedKyselyBuilder<B>` (self) — the shape is unchanged
@@ -149,6 +173,7 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
           rightJoin: JoinFn<B, S, TB & keyof S, E, L>;
           innerJoin: JoinFn<B, S, TB & keyof S, E, L>;
           fullJoin: JoinFn<B, S, TB & keyof S, E, L>;
+          executeTakeFirst: TakeFirstFn<O, B, E, L>;
           executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
         }
       : B extends DeleteQueryBuilder<infer S, infer TB, infer O>
@@ -157,14 +182,17 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
             and: WhereFn<B, S, TB & keyof S, E, L>;
             or: WhereFn<B, S, TB & keyof S, E, L>;
             orWhere: WhereFn<B, S, TB & keyof S, E, L>;
+            executeTakeFirst: TakeFirstFn<O, B, E, L>;
             executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
           }
         : B extends InsertQueryBuilder<any, any, infer O>
           ? {
+              executeTakeFirst: TakeFirstFn<O, B, E, L>;
               executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
             }
           : B extends MergeQueryBuilder<any, any, infer O>
             ? {
+                executeTakeFirst: TakeFirstFn<O, B, E, L>;
                 executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
               }
             : {};
