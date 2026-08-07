@@ -113,4 +113,16 @@ describe("kyselyTryDb — E-tracked takeFirst terminals", () => {
     const result = await builder.executeTakeFirst();
     expect(result.isOk()).toBe(true); // terminals still dispatch on own keys
   });
+
+  test("$call returning an array stays a plain array (no synthetic thenable)", async () => {
+    // arrays inherit Array.prototype.values — the builder detection must
+    // not wrap them, or the proxy synthesizes a thenable that calls a
+    // nonexistent execute (codex P2)
+    const db = makeDb();
+    const arr = wrapped({ ...db, selectFrom: () => ({ ...db.selectFrom(), $call: () => [1, 2] }) })
+      .selectFrom("users")
+      .$call(() => [1, 2]);
+    expect(Array.isArray(arr)).toBe(true);
+    expect(typeof (arr as unknown as Record<string, unknown>).then).toBe("undefined");
+  });
 });

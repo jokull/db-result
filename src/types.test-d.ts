@@ -453,6 +453,15 @@ type _m3 = Assert<Same<MDelOk, { id: number; name: string }[]> extends true ? tr
 type _m4 = Assert<Member<Fk, ErrOfPromise<typeof mDel>> extends true ? true : false>;
 // @ts-expect-error — bogus values column rejected in the output insert too
 const _mBad = mw.insert(mUsers).output().values({ bogus: 1 });
+// the documented full-row update output form — `{ inserted: true }` maps to
+// the table's select model (codex P2; the mapped chain defers the exact
+// instantiation under tsgo — the mechanism itself is exact, probed below
+// via OutputFieldsOf directly):
+import type { OutputFieldsOf } from "./wrap.ts";
+type MFullRow = OutputFieldsOf<{ inserted: true }, typeof mUsers>;
+type _m5 = Assert<Same<MFullRow, { inserted: { id: number; name: string } }> extends true ? true : false>;
+const mUpdFull = mw.update(mUsers).set({ name: "x" }).output({ inserted: true });
+type _m6 = Assert<Member<Fk, ErrOfPromise<typeof mUpdFull>> extends true ? true : false>;
 
 // ─── kyselyTryDb — the E-tracked wrapper ────────────────────────────────────
 

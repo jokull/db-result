@@ -8,6 +8,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { drizzleTryDb } from "./drizzle.js";
+import { Database } from "bun:sqlite";
+import { drizzle as bunDrizzle } from "drizzle-orm/bun-sqlite";
+import { sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 const pgError = (code: string, message: string) =>
   Object.assign(new Error(message), { severity: "ERROR", code, schema: "public" });
@@ -64,6 +67,22 @@ describe("drizzleTryDb — builders, transaction, execute", () => {
     const result = await wrapped.select().from("posts").execute();
     expect(result.isOk()).toBe(true);
     expect(result.value).toEqual([{ id: 1 }]);
+  });
+
+  test("sqlite run terminal E-tracks a duplicate-key write", async () => {
+    // the sqlite/D1 builders' `run` terminal must resolve Err (with
+    // classification) instead of throwing raw — a duplicate key is a
+    // declared outcome on the wrapped surface
+    const client = new Database(":memory:");
+    client.run(`create table "t" ("id" text primary key not null, "name" text)`);
+    const db = bunDrizzle({ client });
+    const t = sqliteTable("t", { id: text("id").primaryKey(), name: text("name") });
+    const wrapped = drizzleTryDb(db);
+    const ok = await wrapped.insert(t).values({ id: "a", name: "b" }).run();
+    expect(ok.isOk()).toBe(true);
+    const dup = await wrapped.insert(t).values({ id: "a", name: "b" }).run();
+    expect(dup.isErr()).toBe(true);
+    if (dup.isErr()) expect(dup.error._tag).toBe("db/unique-violation");
   });
 
   test("insert chain resolves Ok(rows)", async () => {

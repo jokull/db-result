@@ -357,3 +357,45 @@ cause` beats N identical arms.
   gets force-moved, but the noise costs a reset cycle.
 - The LSP hover verification of the blog's wrapped chains is what _surfaced_
   this blocker — the "verify the heavy lifting" exercise earns its keep.
+
+## 13. Fifth-pass codex findings (P1s fixed, P2s documented)
+
+Fourth-pass review (after `64f0236`) surfaced: tag-based family guards must
+read `_tag` (FIXED — the class-static migration had made them instanceof,
+rejecting serialized/cross-realm tagged errors; `tags.test.ts` pinned the
+contract), and the runtime proxy passed pre-execute builders raw
+(`with().insert(t)`, mssql `output()` — FIXED: `isBuilder` covers the
+`values`/`set`/`from`/`output` entry methods + collections are excluded, two
+runtime regression tests).
+
+Fifth-pass review surfaced:
+- **P1 FIXED** — the minimum-TS release gate failed: the per-tag guard
+  migration left `scripts/typescript-minimum-consumer.mts` calling the
+  removed `isUniqueViolation`; now `UniqueViolation.is(e)`.
+- **P1 FIXED** — sqlite/D1 `run`/`all`/`get` terminals escaped the E-track
+  (a duplicate-key `.run()` threw instead of resolving `Err`); the terminals
+  are now wrapped (runtime) and typed (`SqliteTerminalsOf`, keyed off the
+  builders' `_` `dialect: "sqlite"` marker at every chain level; the mapped
+  type drops the raw keys so the terminals own them). Runtime test with a
+  real bun-sqlite db.
+- **P1 FIXED** — a COLUMN is not a valid insert value (it implements
+  `getSQL` — the expression stand-in accepted it; raw drizzle rejects it —
+  it binds as a scalar → NULL). `InsertExpr` excludes the column `_` slot;
+  update sets keep column references. Probes both directions.
+- **P2 FIXED** — kysely takeFirst family detected mutations by ROW SHAPE (a
+  select row matching `DeleteResult` structurally omitted
+  `undefined`/`NoResultError`); the builder brand (`isSelectQueryBuilder`)
+  now decides. Probes the del-shaped select.
+- **P2 FIXED** — arrays/maps qualified as builders (`Array.prototype.values`,
+  `Map.prototype.set`); `isBuilder` excludes collections.
+- **P2 documented** — mssql UPDATE output: the shared `output(fields)` arm
+  accepts what raw drizzle's `SelectedFieldsFlat` accepts (`{ id: t.id }`);
+  the wrapper mirrors drizzle's own surface (its runtime rendering of an
+  unprefixed OUTPUT column is the driver's call). The documented
+  `{ inserted: true }` full-row form maps to the table's select model via
+  `FieldDataOf<true, TTable>` (exact in isolation; the mapped chain defers
+  the instantiation under tsgo — same documented sharp edge).
+- **P2 documented** — with a CONCRETE `NodeMsSqlDatabase` the output chain
+  rows defer (the codex's environment; the repo's probes use the structural
+  `MsSqlDatabase<any>` and are exact). No mssql driver installed to
+  reproduce; the insert/delete output chains are exact either way.

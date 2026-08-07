@@ -42,9 +42,10 @@ import {
   type DefaultLedger,
   type ShapeExclusions,
   type ShapeLedger,
+  type ShapeUnion,
   type TryDbConfig,
 } from "./db-result.js";
-import { isBuilder, wrapBuilder, type WrappedBuilder } from "./wrap.js";
+import { isBuilder, wrapBuilder, type BuilderTerminals, type WrappedBuilder } from "./wrap.js";
 import type { Result } from "better-result";
 // Type-only imports from drizzle's driver-agnostic root modules (relations /
 // utils — not the pg/sqlite/mysql driver subpaths), used to re-express the
@@ -134,6 +135,22 @@ type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
   ShapeExclusions<L, "read">
 >;
 
+/** E-tracked sqlite/D1 terminals — `run` / `all` / `get` (rc.4 types them
+ * `any`; the wrapped surface resolves `Result` with the shape union). The
+ * members are `never` on builders without the method. `values` stays the
+ * insert chain method and is deliberately not a terminal. */
+type SqliteTerminalsOf<B, E extends DbError, L extends ShapeLedger> = {
+  run: B extends { run: (...args: any[]) => any }
+    ? (...args: any[]) => Promise<Result<unknown, ShapeUnion<E, L, B>>>
+    : never;
+  all: B extends { all: (...args: any[]) => any }
+    ? (...args: any[]) => Promise<Result<unknown[], ShapeUnion<E, L, B>>>
+    : never;
+  get: B extends { get: (...args: any[]) => any }
+    ? (...args: any[]) => Promise<Result<unknown, ShapeUnion<E, L, B>>>
+    : never;
+};
+
 /** Wraps a relational query surface: promise-returning methods (`findMany` /
  * `findFirst` / `findOne`) resolve `Result<T, readE>`; `$dynamic`-style
  * methods that return builders are wrapped recursively. */
@@ -186,7 +203,9 @@ export type DrizzleTryDb<
   E extends DbError = DbError,
   L extends ShapeLedger = DefaultLedger,
 > = {
-  select: (...args: Parameters<D["select"]> | []) => WrappedBuilder<ReturnType<D["select"]>, E, L>;
+  select: (
+    ...args: Parameters<D["select"]> | []
+  ) => WrappedBuilder<ReturnType<D["select"]>, E, L>;
   selectDistinct: (
     ...args: Parameters<D["selectDistinct"]> | []
   ) => WrappedBuilder<ReturnType<D["selectDistinct"]>, E, L>;
@@ -309,6 +328,24 @@ const wrapRelational = (
 const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown => {
   if (db === null || typeof db !== "object") return db;
   const wrapExecute = (run: () => unknown) => tryDb(run, config);
+  // E-tracked terminals for the sqlite/D1 builder surface — `run`, `all`,
+  // `get` (the sqlite READ/WRITE terminals; `values` stays the insert chain
+  // method and is deliberately not a terminal). A duplicate-key `run`
+  // resolves `Err` (with retry) instead of throwing raw.
+  const sqliteTerminals: BuilderTerminals = {
+    run: (target, args) => {
+      const t = target as { run(...a: unknown[]): unknown };
+      return wrapExecute(() => t.run(...args));
+    },
+    all: (target, args) => {
+      const t = target as { all(...a: unknown[]): unknown };
+      return wrapExecute(() => t.all(...args));
+    },
+    get: (target, args) => {
+      const t = target as { get(...a: unknown[]): unknown };
+      return wrapExecute(() => t.get(...args));
+    },
+  };
   return new Proxy(db as object, {
     get(target, key) {
       const value = Reflect.get(target, key);
@@ -378,7 +415,9 @@ const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unk
       // builder factories: the entry builder may not expose `execute` yet
       // (insert() before .values(), select() before .from()) — wrap it
       // unconditionally; the chain proxy re-wraps every execute-bearing
-      // result from there on.
+      // result from there on. sqlite/D1 builders also expose the `run` /
+      // `all` / `get` terminals — E-tracked so a duplicate-key `run`
+      // resolves `Err` (and retries) instead of throwing raw.
       if (
         key === "select" ||
         key === "selectDistinct" ||
@@ -387,7 +426,8 @@ const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unk
         key === "update" ||
         key === "delete"
       ) {
-        return (...args: unknown[]) => wrapBuilder(value.apply(target, args), wrapExecute);
+        return (...args: unknown[]) =>
+          wrapBuilder(value.apply(target, args), wrapExecute, sqliteTerminals);
       }
       return value;
     },
