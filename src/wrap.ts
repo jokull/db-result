@@ -17,6 +17,27 @@ export type ExecR<B> = B extends { _: { result: infer R } }
     ? R
     : never;
 
+/** Drizzle's zero-arg `returning()` — all columns — reconstructed
+ * structurally. The mapped chain sees only the LAST overload of the
+ * overloaded `returning` (the `returning(fields)` form), so with no args its
+ * fields generic instantiates at the constraint and the `_` result slot
+ * degrades to `{[x: string]: unknown}[]`. The table is threaded from the
+ * CALL SITE (`insert(table)`) because the intermediate builders' `_` slots
+ * drop it (drizzle's `values()` returns a 3-arg `SQLiteInsertBase` whose
+ * first generic is the table, not the HKT — the `_` slot no longer
+ * resolves). This rebuilds the same builder with the result slot set to the
+ * table's `$inferSelect` shape — what drizzle's own
+ * `SQLiteInsertReturningAll`/`UpdateReturningAll` compute. */
+export type ReturningAll<B, TTable> = TTable extends { $inferSelect: infer S }
+  ? Omit<B, "_"> & {
+      _: (B extends { _: infer Slot } ? Omit<Slot, "result" | "returning"> : {}) & {
+        table: TTable;
+        returning: S;
+        result: S[];
+      };
+    }
+  : B;
+
 /** A builder whose `execute`/`then`/`catch`/`finally` resolve to
  * `Result<T, E>` and whose chain methods keep returning E-tracked builders.
  * The union narrows per builder shape via the ledger — exactly like
@@ -24,23 +45,36 @@ export type ExecR<B> = B extends { _: { result: infer R } }
  * original signatures. `values` is special-cased: Drizzle/Kysely overload it
  * (single value | array), and the mapped type would keep only the last
  * overload — the array-element union restores the single-object form. */
-export type WrappedBuilder<B, E extends DbError, L extends ShapeLedger> = {
+export type WrappedBuilder<
+  B,
+  E extends DbError,
+  L extends ShapeLedger,
+  TTable = B extends { _: { table: infer T } } ? T : never,
+> = {
   [K in keyof B as K extends "execute" | keyof Promise<unknown> ? never : K]: B[K] extends (
     ...args: infer A
   ) => infer R
     ? R extends { execute: (...args: any[]) => PromiseLike<unknown> }
       ? K extends "returning"
-        ? // Drizzle overloads `returning()` (zero-arg, all columns) with
-          // `returning(columns)`; the mapped type keeps only the last
-          // overload, so the zero-arg form is restored explicitly.
-          ((...args: A) => WrappedBuilder<R, E, L>) & (() => WrappedBuilder<R, E, L>)
+        ? // Drizzle overloads `returning()`: zero-arg (all columns) and
+          // `returning(fields)`. The mapped conditional infers `R`/`A` from
+          // the overloaded method and the inference is unusable: `A` comes
+          // back `[]` (matching zero-arg calls) and `R` carries polymorphic
+          // `this` unresolved, so `ExecR` falls through to the execute
+          // branch. The zero-arg arm therefore reconstructs from the
+          // CURRENT builder `B` (concrete): all columns from B's table via
+          // `ReturningAll`. The fields arm keeps the wrapped-but-degraded
+          // inference (drizzle's per-call fields projection can't be
+          // reconstructed structurally — tracked as a follow-up).
+          ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
+            (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable>)
         : K extends "values"
           ? A extends [infer V]
             ? V extends readonly unknown[]
-              ? (value: V | V[number]) => WrappedBuilder<R, E, L>
-              : (...args: A) => WrappedBuilder<R, E, L>
-            : (...args: A) => WrappedBuilder<R, E, L>
-          : (...args: A) => WrappedBuilder<R, E, L>
+              ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+              : (...args: A) => WrappedBuilder<R, E, L, TTable>
+            : (...args: A) => WrappedBuilder<R, E, L, TTable>
+          : (...args: A) => WrappedBuilder<R, E, L, TTable>
       : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {

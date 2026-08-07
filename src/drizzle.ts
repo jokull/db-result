@@ -104,9 +104,15 @@ export type DrizzleTryDb<
   selectDistinctOn: D["selectDistinctOn"] extends (...args: infer A) => infer B
     ? (...args: A | []) => WrappedBuilder<B, E, L>
     : never;
-  insert: (...args: Parameters<D["insert"]>) => WrappedBuilder<ReturnType<D["insert"]>, E, L>;
-  update: (...args: Parameters<D["update"]>) => WrappedBuilder<ReturnType<D["update"]>, E, L>;
-  delete: (...args: Parameters<D["delete"]>) => WrappedBuilder<ReturnType<D["delete"]>, E, L>;
+  insert: <TTable extends { $inferSelect: unknown }>(
+    table: TTable,
+  ) => WrappedBuilder<ReturnType<D["insert"]>, E, L, TTable>;
+  update: <TTable extends { $inferSelect: unknown }>(
+    table: TTable,
+  ) => WrappedBuilder<ReturnType<D["update"]>, E, L, TTable>;
+  delete: <TTable extends { $inferSelect: unknown }>(
+    table: TTable,
+  ) => WrappedBuilder<ReturnType<D["delete"]>, E, L, TTable>;
   transaction<T>(
     cb: (tx: DrizzleTryDb<TransactionOf<D>, E, L>) => PromiseLike<T> | T,
     ...rest: D["transaction"] extends (cb: any, ...rest2: infer R) => any ? R : never[]

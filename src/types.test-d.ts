@@ -475,6 +475,24 @@ const sIns = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" });
 type _rel0 = Assert<
   Member<Unique, ErrOf<ReturnType<typeof sIns.execute>>> extends true ? true : false
 >;
+// ISSUES.md #1: wrapped chains must keep drizzle's precise rows through
+// zero-arg `.returning()` — not the degraded Record<string, unknown>[].
+const sInsRet = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" }).returning();
+type _relRetOk = OkOfPromise<typeof sInsRet>;
+type _relRet0 = Assert<
+  Same<_relRetOk, { slug: string; title: string | null }[]> extends true ? true : false
+>;
+type _relRet1 = Assert<Record<string, unknown>[] extends _relRetOk ? false : true>;
+const sUpdRet = wrappedSqlite.update(rPosts).set({ title: "c" }).where(undefined).returning();
+type _relUpdOk = OkOfPromise<typeof sUpdRet>;
+type _relUpd0 = Assert<
+  Same<_relUpdOk, { slug: string; title: string | null }[]> extends true ? true : false
+>;
+const sDelRet = wrappedSqlite.delete(rPosts).where(undefined).returning();
+type _relDelOk = OkOfPromise<typeof sDelRet>;
+type _relDel0 = Assert<
+  Same<_relDelOk, { slug: string; title: string | null }[]> extends true ? true : false
+>;
 // …and relational reads E-track with the READ union (constraints excluded).
 const relMany = wrappedSqlite.query.rPosts.findMany({ orderBy: { title: "asc" } });
 type _rel1 = Assert<Absent<Unique, ErrOfPromise<typeof relMany>> extends true ? true : false>;
