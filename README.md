@@ -51,6 +51,7 @@ Built on [better-result](https://github.com/dmmulroy/better-result). You adopt i
 
 ```ts
 import { matchErrorPartial } from "better-result";
+import type { UniqueViolation } from "db-result";
 import { tryDb } from "db-result/pg"; // or /sqlite /mysql2 /mssql /d1: subpath per driver
 
 const outcome = await tryDb(db.insert(users).values({ email }).returning());
@@ -59,10 +60,13 @@ if (outcome.isErr()) {
   return matchErrorPartial(
     outcome.error,
     {
-      "db/unique-violation": (e) => c.json({ error: "email_taken", constraint: e.constraint }, 409),
+      // handlers are annotated with the concrete tag class — the library's
+      // match-error idiom (the key must match the handler's `_tag`)
+      "db/unique-violation": (e: UniqueViolation) =>
+        c.json({ error: "email_taken", constraint: e.constraint }, 409),
     },
     (unhandled) => {
-      reportError(unhandled); // the compiler spells out the remaining tags here
+      reportError(unhandled); // typed as the remainder — the tags the fold didn't claim
       return c.json({ error: "internal" }, 500);
     },
   );
@@ -105,8 +109,16 @@ Every tag has a predicate (`isUniqueViolation(e)`, `isQueryFailure(e)`, …) —
 the imperative alternative to folding. `isDataError`, `isDeadlock`,
 `isLockTimeout`, `isTransactionAborted`, `isConnectFailure`,
 `isConnectionLost` cover the data, contention, and connection tags.
-`isConnectionFailure` is the family guard: true for either connection tag
-(`db/connect-failure` or `db/connection-lost`).
+Family guards group the tags most often folded together:
+`isConnectionFailure` is true for either connection tag (`db/connect-failure`
+or `db/connection-lost`); `isConstraintViolation` is true for any of the four
+constraint tags (`db/unique-violation`, `db/foreign-key-violation`,
+`db/not-null-violation`, `db/check-violation`) — the canonical "your input
+broke a schema rule" fold. When a fold sends each constraint tag to the same
+outcome, one guard check beats four identical match arms; when the arms
+diverge or read the error, `matchErrorPartial(error, folds, onUnhandled)` is
+the fold (handlers that read the error annotate the concrete class, per
+better-result's docs).
 
 ## Shape-aware types: the union narrows itself
 
@@ -192,9 +204,15 @@ whole, raw `execute` re-invokes — the wrapper owns the re-invocation, so there
 are no thunks at the call site. Per ORM:
 
 - **drizzle** — builder chains E-track; the union narrows per builder shape;
-  rows degrade to `Record<string, any>`-shaped arrays (the mapped chain can't
-  preserve Drizzle's generics — drop to `tryDb(builder)` where row literals
-  matter); `query`/`$with` pass through raw.
+  relational queries (`db.query.<table>.findMany/findFirst/findOne`) resolve
+  `Result<T, readUnion>` — the constraint tags excluded, retry applied —
+  so the whole surface is on Result shapes; rows degrade to
+  `Record<string, any>`-shaped arrays on wrapped chains (the mapped chain
+  can't preserve Drizzle's generics — drop to `tryDb(builder)` where row
+  literals matter). Pass a **raw** builder there: `tryDb` on an already
+  E-tracked builder would wrap the Result again — keep the unwrapped handle
+  (`rawDb`) around for row-exact writes. `$with` and `refreshMaterializedView`
+  pass through raw.
 - **kysely** — builder chains E-track with the **rows staying precise**
   (Kysely's chain methods return the same class parameters; the overloaded
   `where`/`set`/`values`/join forms are re-added explicitly); `with(...)` CTE

@@ -2,6 +2,26 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.1] — 2026-08-07
+
+Dogfooded against a real D1 + drizzle 1.0.0-rc.4 codebase (the blog), which surfaced and fixed the wrapper's gaps.
+
+### Added
+
+- **Relational query E-track in `drizzleTryDb`** — `db.query.<table>.findMany/findFirst/findOne` resolve `Result<T, readUnion>` (constraint tags excluded per the driver's ledger) with the same classification and retry; `$dynamic` builders are wrapped recursively. The blog's relational-first surface is now fully on Result shapes.
+- **Driver-agnostic drizzle wrapper types** — the wrapper is structural over the db's own method signatures (it was `PgAsyncDatabase`-only), so pg, sqlite/D1, mysql, and mssql drizzle databases all typecheck with no drizzle-internal imports.
+- **Zero-arg `.returning()` restored** on wrapped drizzle chains — the mapped type kept only the overloaded columns form, breaking `.values(...).returning()`.
+- **`executeTakeFirst` on every Kysely builder family** — the mapped type no longer drops it on insert/update/delete/merge.
+- **postgres.js integration tests** — real-Docker coverage beside pg, mysql2, and mssql.
+- **`kyselyTryDb` convenience-terminal E-track** — `executeTakeFirst` resolves `Result<T | undefined, E>`, `executeTakeFirstOrThrow` resolves `Result<T, E | NoResultError>` with a custom `errorConstructor` honored (Kysely's only throw becomes a value).
+- **`isConstraintViolation` family guard** — one predicate for the four constraint tags (`unique`/`foreign-key`/`not-null`/`check`), beside the existing `isConnectionFailure` grouping — the canonical "input broke a schema rule" fold collapses to one check.
+
+### Fixed
+
+- **Codex review findings**: wrapped builders no longer execute on property inspection (`.then`/`.catch` reads are lazy — merely checking thenability never runs the query); terminal dispatch uses own-property checks so `.constructor`/`.hasOwnProperty` pass through; the custom-`errorConstructor` union is honest (`Result<T, E | YourError>`, never a claimed `NoResultError`).
+- **Docs**: README vocabulary matches the shipped 14 tags (connect-failure/connection-lost split, data-error, deadlock, lock-timeout, transaction-aborted); the `matchErrorPartial` example uses the real 3-arg form with annotated handlers; stale lattice doc references removed.
+- **Test organization**: suites colocated with their modules (`src/*.test.ts`, `src/classify/*.test.ts`), compile-only type matrix at `src/types.test-d.ts`, live integration at `src/integration.test.ts` — `bun test` runs with zero config.
+
 ## [0.1.0] — 2026-08-06
 
 First public release. Database failures as better-result tagged errors — `Result<T, DbError>`, retry-safe, driver-agnostic.

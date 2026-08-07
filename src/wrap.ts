@@ -29,13 +29,18 @@ export type WrappedBuilder<B, E extends DbError, L extends ShapeLedger> = {
     ...args: infer A
   ) => infer R
     ? R extends { execute: (...args: any[]) => PromiseLike<unknown> }
-      ? K extends "values"
-        ? A extends [infer V]
-          ? V extends readonly unknown[]
-            ? (value: V | V[number]) => WrappedBuilder<R, E, L>
+      ? K extends "returning"
+        ? // Drizzle overloads `returning()` (zero-arg, all columns) with
+          // `returning(columns)`; the mapped type keeps only the last
+          // overload, so the zero-arg form is restored explicitly.
+          ((...args: A) => WrappedBuilder<R, E, L>) & (() => WrappedBuilder<R, E, L>)
+        : K extends "values"
+          ? A extends [infer V]
+            ? V extends readonly unknown[]
+              ? (value: V | V[number]) => WrappedBuilder<R, E, L>
+              : (...args: A) => WrappedBuilder<R, E, L>
             : (...args: A) => WrappedBuilder<R, E, L>
           : (...args: A) => WrappedBuilder<R, E, L>
-        : (...args: A) => WrappedBuilder<R, E, L>
       : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {

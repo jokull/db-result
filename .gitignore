@@ -36,3 +36,7 @@ local.db*
 
 # scratch
 .consumer-check.ts
+HANDOFF.md
+
+# local tooling
+.omp/
