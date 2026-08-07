@@ -387,7 +387,21 @@ const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unk
             const method = object[k] as (...a: unknown[]) => unknown;
             wrapped[k] = (...a: unknown[]) => {
               const result = method.apply(object, a);
-              return isBuilder(result) ? wrapBuilder(result, wrapExecute) : result;
+              // the known factory keys wrap unconditionally (their entry
+              // builders may lack `execute` — insert() before .values(),
+              // update() before .set()) — mirroring the top-level factories;
+              // anything else wraps when builder-shaped. The sqlite
+              // terminals ride along so `with(...).insert(t).values(...).run()`
+              // stays E-tracked (codex P1).
+              return k === "select" ||
+                k === "selectDistinct" ||
+                k === "insert" ||
+                k === "update" ||
+                k === "delete"
+                ? wrapBuilder(result, wrapExecute, sqliteTerminals)
+                : isBuilder(result)
+                  ? wrapBuilder(result, wrapExecute, sqliteTerminals)
+                  : result;
             };
           }
           return wrapped;

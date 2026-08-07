@@ -85,6 +85,23 @@ describe("drizzleTryDb — builders, transaction, execute", () => {
     if (dup.isErr()) expect(dup.error._tag).toBe("db/unique-violation");
   });
 
+  test("sqlite run terminal E-tracks through the with() CTE path", async () => {
+    // the with factories wrap unconditionally and carry the sqlite
+    // terminals — a constraint failure on `with(...).insert(...).run()`
+    // resolves Err instead of throwing (codex P1)
+    const client = new Database(":memory:");
+    client.run(`create table "t" ("id" text primary key not null, "name" text)`);
+    const db = bunDrizzle({ client });
+    const t = sqliteTable("t", { id: text("id").primaryKey(), name: text("name") });
+    const cte = db.$with("x").as(db.select().from(t));
+    const wrapped = drizzleTryDb(db);
+    const ok = await wrapped.with(cte).insert(t).values({ id: "a", name: "b" }).run();
+    expect(ok.isOk()).toBe(true);
+    const dup = await wrapped.with(cte).insert(t).values({ id: "a", name: "b" }).run();
+    expect(dup.isErr()).toBe(true);
+    if (dup.isErr()) expect(dup.error._tag).toBe("db/unique-violation");
+  });
+
   test("insert chain resolves Ok(rows)", async () => {
     const wrapped = drizzleTryDb(makeDb() as never) as any;
     const result = await wrapped.insert("posts").values({}).returning().execute();

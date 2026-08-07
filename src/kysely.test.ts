@@ -125,4 +125,37 @@ describe("kyselyTryDb — E-tracked takeFirst terminals", () => {
     expect(Array.isArray(arr)).toBe(true);
     expect(typeof (arr as unknown as Record<string, unknown>).then).toBe("undefined");
   });
+
+  test("$call returning a set-bearing non-builder stays raw (URLSearchParams)", async () => {
+    // URLSearchParams has `set` but is not a builder — `set` only matches
+    // with a builder marker, so no synthetic thenable appears
+    const db = makeDb();
+    const params = wrapped({
+      ...db,
+      selectFrom: () => ({ ...db.selectFrom(), $call: () => new URLSearchParams("a=1") }),
+    })
+      .selectFrom("users")
+      .$call(() => new URLSearchParams("a=1"));
+    expect(params).toBeInstanceOf(URLSearchParams);
+    expect(typeof (params as unknown as Record<string, unknown>).then).toBe("undefined");
+  });
+
+  test("mergeInto E-tracks its builders", async () => {
+    // the merge factory was left in the raw pass-through surface — its
+    // execute resolved raw instead of Result (codex P2)
+    const db = makeDb();
+    const merged = wrapped({
+      ...db,
+      mergeInto: () => ({
+        execute: async () => ({ numInsertedOrUpdatedRows: 1n }),
+        executeTakeFirst: async () => ({ numInsertedOrUpdatedRows: 1n }),
+        toOperationNode: () => node,
+      }),
+    }).mergeInto("users");
+    const result = await merged.execute();
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value).toEqual({ numInsertedOrUpdatedRows: 1n });
+    const first = await merged.executeTakeFirst();
+    expect(first.isOk()).toBe(true);
+  });
 });

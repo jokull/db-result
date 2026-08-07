@@ -299,6 +299,9 @@ export type KyselyTryDb<
   deleteFrom<TB extends keyof SchemaOf<D>>(
     table: TB,
   ): WrappedKyselyBuilder<DeleteQueryBuilder<SchemaOf<D>, TB, DeleteResult>, E, L>;
+  mergeInto<TB extends keyof SchemaOf<D>>(
+    table: TB,
+  ): WrappedKyselyBuilder<MergeQueryBuilder<SchemaOf<D>, TB, unknown>, E, L>;
   transaction(): WrappedTransaction<D, E, L>;
   executeQuery<T>(compilable: Compilable<T>): Promise<Result<QueryResult<T>, E>>;
 } & {
@@ -307,6 +310,7 @@ export type KyselyTryDb<
     | "insertInto"
     | "updateTable"
     | "deleteFrom"
+    | "mergeInto"
     | "transaction"
     | "executeQuery"
     ? never
@@ -398,7 +402,8 @@ const wrapKysely = (db: unknown, config: TryDbConfig<DbError> | undefined): unkn
         key === "selectFrom" ||
         key === "insertInto" ||
         key === "updateTable" ||
-        key === "deleteFrom"
+        key === "deleteFrom" ||
+        key === "mergeInto"
       ) {
         return (...args: unknown[]) =>
           wrapBuilder(value.apply(target, args), wrapExecute, takeFirstTerminals);
