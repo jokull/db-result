@@ -20,7 +20,7 @@ tryDb(() => prisma.user.findMany({ where: { id } }));
 1. **A probe firing is evidence; a non-match falls through.** Each probe is a
    structural marker an ORM actually emits (verified against Kysely 0.29 and
    Drizzle 1.0.0-rc.4 as produced by the real `drizzle()` factory in
-   `test.types.ts` — the type tests are the contract).
+   `src/types.test-d.ts` — the type tests are the contract).
 2. **A tag stays unless a shape proves it impossible.** The union only shrinks.
    An unproven tag staying is safe (conservative); a wrongly-removed tag is a
    lie.

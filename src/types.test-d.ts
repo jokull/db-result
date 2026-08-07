@@ -25,7 +25,7 @@
  * `true | false`; the `Assert` wrapper enforces the result at the use site
  * (a `true | never` helper would fail silently through a `never` alias).
  */
-import { tryDb, tryTx, type ShapeOfQuery, type DbError } from "./src/db-result.ts";
+import { tryDb, tryTx, type ShapeOfQuery, type DbError } from "./db-result.ts";
 import type {
   CheckViolation,
   ConnectFailure,
@@ -36,8 +36,8 @@ import type {
   NotNullViolation,
   TransactionAborted,
   UniqueViolation,
-} from "./src/db-result.ts";
-import { tryDb as sqliteTryDb, type SqliteDbError } from "./src/drivers/sqlite.ts";
+} from "./db-result.ts";
+import { tryDb as sqliteTryDb, type SqliteDbError } from "./drivers/sqlite.ts";
 import type {
   Kysely,
   SelectQueryBuilder,
@@ -46,6 +46,7 @@ import type {
   DeleteQueryBuilder,
   MergeQueryBuilder,
   RawBuilder,
+  NoResultError,
 } from "kysely";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -67,6 +68,9 @@ type Same<U, V> = [U] extends [V] ? ([V] extends [U] ? true : false) : false;
 
 /** The error union of a `tryDb` call: `Promise<Result<T, E>>` → `E`. */
 type ErrOf<R> = R extends Promise<Result<unknown, infer E>> ? E : never;
+
+/** The ok value of a `Result` promise: `Promise<Result<T, E>>` → `T`. */
+type OkOf<R> = R extends Promise<Result<infer T, unknown>> ? T : never;
 
 // The tag classes, for readable asserts.
 type Unique = UniqueViolation;
@@ -260,7 +264,7 @@ type _s4 = Assert<Same<ErrOf<typeof sqliteZeroArg>, SqliteDbError>>;
 
 // ─── drizzleTryDb — the E-tracked wrapper ───────────────────────────────────
 
-import { drizzleTryDb } from "./src/drizzle.ts";
+import { drizzleTryDb } from "./drizzle.ts";
 
 const wrapped = drizzleTryDb(db);
 
@@ -322,12 +326,12 @@ type _w13 = Assert<Same<typeof wrapped.query, typeof db.query> extends true ? tr
 type _w14 = Assert<Same<typeof wrapped.$with, typeof db.$with> extends true ? true : false>;
 
 // protocol-tight E is available via the explicit generic.
-import type { DrizzleTryDb } from "./src/drizzle.ts";
+import type { DrizzleTryDb } from "./drizzle.ts";
 type _w15 = Assert<DrizzleTryDb<typeof db, SqliteDbError> extends unknown ? true : false>;
 
 // ─── kyselyTryDb — the E-tracked wrapper ────────────────────────────────────
 
-import { kyselyTryDb } from "./src/kysely.ts";
+import { kyselyTryDb } from "./kysely.ts";
 
 declare const kdb: Kysely<DB>;
 const kw = kyselyTryDb(kdb);
@@ -373,9 +377,49 @@ type _kq10 = Assert<Same<ErrOf<typeof ktx>, DbError> extends true ? true : false
 const kraw = kw.executeQuery({ compile: () => ({ sql: "select 1", parameters: [] }) } as never);
 type _kq11 = Assert<Same<ErrOf<typeof kraw>, DbError> extends true ? true : false>;
 
+// takeFirst family: E-tracked terminals — executeTakeFirst → Ok(row |
+// undefined), executeTakeFirstOrThrow → Err(NoResultError) on no row.
+// Shape narrowing applies to both (select excludes the constraint tags;
+// delete keeps FK only; write shapes keep everything).
+type _kt1 = Assert<
+  Member<undefined, OkOf<ReturnType<typeof ksel.executeTakeFirst>>> extends true ? true : false
+>;
+type _kt2 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof ksel.executeTakeFirst>>> extends true ? true : false
+>;
+type _kt3 = Assert<
+  Absent<undefined, OkOf<ReturnType<typeof ksel.executeTakeFirstOrThrow>>> extends true
+    ? true
+    : false
+>;
+type _kt4 = Assert<
+  Member<NoResultError, ErrOf<ReturnType<typeof ksel.executeTakeFirstOrThrow>>> extends true
+    ? true
+    : false
+>;
+type _kt5 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof kins.executeTakeFirstOrThrow>>> extends true ? true : false
+>;
+type _kt6 = Assert<
+  Member<NoResultError, ErrOf<ReturnType<typeof kins.executeTakeFirstOrThrow>>> extends true
+    ? true
+    : false
+>;
+type _kt7 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof kdel.executeTakeFirstOrThrow>>> extends true ? true : false
+>;
+type _kt8 = Assert<
+  Member<Fk, ErrOf<ReturnType<typeof kdel.executeTakeFirstOrThrow>>> extends true ? true : false
+>;
+type _kt9 = Assert<
+  Member<NoResultError, ErrOf<ReturnType<typeof kupd.executeTakeFirstOrThrow>>> extends true
+    ? true
+    : false
+>;
+
 // ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
 
-import { prismaTryDb } from "./src/prisma.ts";
+import { prismaTryDb } from "./prisma.ts";
 import { PrismaClient } from "@prisma/client";
 
 // Type-only: never executed, so no DATABASE_URL is needed at construction.

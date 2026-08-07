@@ -94,7 +94,8 @@ A tag earns its place when it changes a caller decision real apps make **and**
 transaction), `db/statement-timeout` (`57014` currently folds into transient
 `db/query-failure`).
 
-To add a signal, extend `classifyNode` in `src/db-result.ts` (the protocol
+To add a signal, extend `classifyNode` in `src/classify/index.ts` (the protocol
 tables are structural — no registration, no imports), then prove it with a
-fixture in `test.db-result.ts` (the fixtures are the contract) and a real-driver
-test in `test.integration.ts`.
+fixture in the per-protocol test file next to it (`src/classify/*.test.ts` —
+the fixtures are the contract) and a real-driver test in
+`src/integration.test.ts`.

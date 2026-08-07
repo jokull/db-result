@@ -3,8 +3,11 @@
  *
  * Core entry point: the protocol-detecting `tryDb` with shape-aware types,
  * the whole-transaction `tryTx`, the full 14-tag `DbError` vocabulary and
- * guards, and the shape lattice (`IsTxParam` + probes + `ShapeLedger`) that
- * narrows the error union from the thunk's parameter type.
+ * guards, and the shape lattice — structural probes of the query value's own
+ * type (Kysely's builder surface, Drizzle's clause surface) classify it as
+ * read / write / delete / opaque, and `ShapeLedger` narrows the error union
+ * to the tags that shape provably cannot produce (see `ShapeOfQuery` /
+ * `ShapeUnion` in db-result.ts).
  *
  * Per-driver entry points narrow the error union by protocol and export
  * driver-typed `tryDb` / `tryTx` variants, each with its own ledger:

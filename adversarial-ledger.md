@@ -70,7 +70,7 @@ retry-safe), `:286` (23505 → UniqueViolation).
 
 ---
 
-# Drizzle (18 attacks — 3 LIES, same root cause)
+# Drizzle (19 attacks — 3 LIES, same root cause)
 
 Compile ground truth: node_modules/drizzle-orm 1.0.0-rc.4 — the real `drizzle()` factory
 (drizzle-orm/node-postgres) returns ASYNC builders. Fork: ~/Forks/drizzle-orm.
@@ -165,6 +165,6 @@ Docs updated: `src/db-result.ts` ledger/probe comments, `test.types.ts` (tx-abor
 to Member + DDL fail-loud row + where'd-delete opaque row), README, shapes.md,
 transactions.md, SKILL.md.
 
-Post-fix re-verification: full suite green (111 unit + 6 integration, tsc, lint, fmt,
+Post-fix re-verification: full suite green (111 unit + 9 integration, tsc, lint, fmt,
 build, publint+attw, TS 5.4.5 consumer). The exact repros above now fail to compile
 (`Absent<TxAborted, …>` no longer holds) or probe opaque — the lies are closed.

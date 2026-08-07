@@ -25,6 +25,16 @@ Built on [better-result](https://github.com/dmmulroy/better-result). You adopt i
                          authorization-failed    query-failure
   ```
 
+  `unique-violation`, `foreign-key-violation`, `not-null-violation` and
+  `check-violation` each carry the driver's `constraint` identifier.
+  `connect-failure` means the channel was never established (DNS, refused,
+  timeout) — safe to retry; `connection-lost` means it died mid-query —
+  ambiguous, never auto-retried. That split is deliberate: connect-phase vs
+  mid-query. `data-error` is a value problem (too long, overflow, bad input);
+  `deadlock` includes serialization failures (`40001`); `lock-timeout` includes
+  SQLite `BUSY`/`LOCKED`; `transaction-aborted` (`25P02`) means the whole
+  transaction is dead; `query-failure` is the known-but-unspecific catch-all.
+
   No `instanceof`, no `error.code === "23505"`.
 
 - **Narrow** the error union from the query's own type: pass the builder value
@@ -76,15 +86,27 @@ wrap the whole `db.transaction()` in `tryTx` (whole-thunk retry). Details:
 
 ## The retry doctrine, in one breath
 
-Deterministic failures (constraints, auth, syntax) never retry; it's theater. The
-transient set (deadlock incl. serialization `40001` and Prisma's `P2034`,
-lock-timeout, busy, connect-refused, too-many-connections) auto-retries with
-per-error backoff. **Connection lost mid-query never auto-retries**: the write may
-have committed; retrying could double it. An explicit `retry` config always wins;
+Deterministic failures (constraints, auth, authz, syntax, data) never retry; it's
+theater. The transient set auto-retries with per-error backoff: `db/deadlock`
+(incl. serialization `40001` and Prisma's `P2034`), `db/lock-timeout`,
+`db/connect-failure` (connect-refused, DNS, timeout), `db/query-failure` for
+too-many-connections / statement-timeout, plus SQLite `BUSY`/`LOCKED`.
+**Connection lost mid-query never auto-retries** — and neither does
+`db/transaction-aborted`: the write may have committed (or the whole tx is dead),
+retrying could double it. An explicit `retry` config always wins;
 `isRetriedError(e)` tells you a failure survived N attempts. If your ORM has its own
 retry layer underneath (Prisma's pool acquisition), db-result's retries stack on top;
 set `retryTransient: false` to keep only the ORM's, or disable the ORM's to keep only
 ours. Details: [retry](./skills/db-result/references/retry.md).
+
+## Guards
+
+Every tag has a predicate (`isUniqueViolation(e)`, `isQueryFailure(e)`, …) —
+the imperative alternative to folding. `isDataError`, `isDeadlock`,
+`isLockTimeout`, `isTransactionAborted`, `isConnectFailure`,
+`isConnectionLost` cover the data, contention, and connection tags.
+`isConnectionFailure` is the family guard: true for either connection tag
+(`db/connect-failure` or `db/connection-lost`).
 
 ## Shape-aware types: the union narrows itself
 
@@ -177,6 +199,11 @@ are no thunks at the call site. Per ORM:
   (Kysely's chain methods return the same class parameters; the overloaded
   `where`/`set`/`values`/join forms are re-added explicitly); `with(...)` CTE
   chains pass through raw; transactions resolve at `transaction().execute(cb)`.
+  The convenience terminals are E-tracked too: `executeTakeFirst` resolves
+  `Result<T | undefined, E>` (no row is `Ok(undefined)`, like Kysely), and
+  `executeTakeFirstOrThrow` resolves `Result<T, E | NoResultError>` — Kysely's
+  only throw becomes a value, custom `errorConstructor` honored. Shape
+  narrowing applies to both.
 - **prisma** — delegate calls, `$transaction` (interactive and batch), and raw
   `$queryRaw` resolve to Result with a **full union** (Prisma has no builder
   types to probe — nothing is narrowed, honestly); wrap the client after
@@ -228,17 +255,19 @@ unions), [retry](skills/db-result/references/retry.md), [transactions](skills/db
 
 ## Verification
 
-Runs on Node ≥ 18 and Bun (D1/miniflare targets Workers). ESM only; TypeScript ≥ 5.4.
+Runs on Node ≥ 18 and Bun (D1 targets Workers). ESM only; TypeScript ≥ 5.4.
 Real-driver tests run locally against a Docker suite (pg 16, mysql 8, mssql 2022) and
-embedded engines (bun:sqlite, node:sqlite, better-sqlite3, libsql, D1/miniflare):
+embedded engines (bun:sqlite, node:sqlite, better-sqlite3, libsql):
 
 ```sh
-bun test                          # fixtures + embedded, zero setup
-docker compose up -d --wait       # + the three DSNs (see package.json) →
-bun run test:integration
+bun test                          # everything — unit suites are colocated next to
+                                  # their module (src/**/*.test.ts); integration
+                                  # suites skip without their DSNs
+docker compose up -d --wait       # + the DSNs (see package.json) →
+bun run test:integration          # the live Docker pass only
 ```
 
-Status: `0.0.1`, MIT, pre-1.0. Every release runs the full suite above first.
+Status: `0.1.0`, MIT. Every release runs the full suite above first.
 
 Classification modeled on [Effect SQL](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/unstable/sql/SqlError.ts),
 finer on the constraint family (FK/not-null/check stay separate for the fold),

@@ -8,11 +8,16 @@
     "driver",
     "drizzle",
     "error-handling",
+    "kysely",
+    "mssql",
+    "mysql",
     "postgres",
+    "prisma",
     "result",
     "retry",
     "sql",
-    "sqlite"
+    "sqlite",
+    "sqlstate"
   ],
   "homepage": "https://github.com/jokull/db-result#readme",
   "bugs": {
@@ -83,14 +88,15 @@
   "scripts": {
     "build": "tsdown",
     "prepublishOnly": "bun run build",
-    "test": "bun test ./test.db-result.ts ./test.integration.ts",
-    "test:integration": "bun test ./test.integration.ts",
+    "test": "bun test",
+    "test:integration": "bun test src/integration.test.ts",
     "check": "tsc --noEmit",
     "lint": "oxlint .",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "check:exports": "bunx publint && bunx attw --pack --profile esm-only",
-    "check:typescript-minimum": "bun x --yes --package typescript@5.4.5 tsc -p tsconfig.typescript-minimum.json"
+    "check:typescript-minimum": "bun run build && bun x --yes --package typescript@5.4.5 tsc -p tsconfig.typescript-minimum.json",
+    "db:generate": "prisma generate"
   },
   "dependencies": {
     "better-result": "^3.0.0"

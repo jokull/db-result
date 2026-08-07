@@ -1,6 +1,12 @@
-// Type-test fixture schema — generates the real Prisma client types that
-// test.types.ts imports. The datasource is never touched at runtime (type
-// tests are compile-only), but must be valid.
+// Type-test fixture schema — exists solely to generate the real Prisma
+// client types that test.types.ts imports. The datasource is never touched
+// at runtime (type tests are compile-only), but must be valid.
+//
+// Regenerate with: npx prisma generate   (or: bun run db:generate)
+// The generator block has no `output`, so the client lands in
+// node_modules/.prisma/client (the prisma-client-js default) — already
+// covered by the `node_modules` gitignore entry, so generated code is never
+// committed.
 generator client {
   provider = "prisma-client-js"
 }

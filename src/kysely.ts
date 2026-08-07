@@ -17,14 +17,25 @@
  * forms) are re-added explicitly — the mapped type would keep only the last
  * overload.
  *
+ * The E-track also covers the convenience terminals: `executeTakeFirst`
+ * resolves `Result<T | undefined, E>` (no row is `Ok(undefined)`, matching
+ * Kysely's own contract) and `executeTakeFirstOrThrow` resolves
+ * `Result<T, E | NoResultError>` — Kysely's only throw becomes a value, and
+ * a custom `errorConstructor` is honored. Shape narrowing applies to both.
+ *
  * Sharp edges:
  *   - `with(...)` CTE chains, `destroy`, `withPlugin`, and the executor pass
  *     through raw — CTE chains are typed through `tryDb(builder)`.
  *   - transactions resolve to Result at the `transaction().execute(cb)`
  *     terminal.
+ *   - `where`'s 1-arg expression form (`where(eb => …)`) and the callback
+ *     join forms (`innerJoin(eb => …)`) are dropped on wrapped builders —
+ *     the mapped type restores the keyed/3-arg forms only. Use the keyed
+ *     forms, or raw chains + `tryDb(builder)` for expression callbacks.
  *
- * Type imports from kysely are erased at build time — the runtime bundle has
- * no kysely dependency.
+ * The runtime imports only `NoResultError` and `isNoResultErrorConstructor`
+ * from kysely (the peer dep is guaranteed present when this entry point is
+ * used); everything else is type-only.
  */
 import {
   tryDb,
@@ -35,8 +46,16 @@ import {
   type ShapeUnion,
   type TryDbConfig,
 } from "./db-result.js";
-import { ExecR, wrapBuilder } from "./wrap.js";
-import type { Result } from "better-result";
+import { ExecR, wrapBuilder, type BuilderTerminals } from "./wrap.js";
+import { Result } from "better-result";
+import {
+  NoResultError,
+  isNoResultErrorConstructor,
+  type AbortableQueryOptions,
+  type ExecuteTakeFirstOrThrowOptions,
+  type MergeQueryBuilder,
+  type QueryNode,
+} from "kysely";
 import type {
   ComparisonOperatorExpression,
   OrderByExpression,
@@ -88,6 +107,17 @@ type JoinFn<B, S, TB extends keyof S, E extends DbError, L extends ShapeLedger> 
   k2: K2,
 ) => WrappedKyselyBuilder<B, E, L>;
 
+/** E-tracked `executeTakeFirst`: no row is `Ok(undefined)`, like Kysely. */
+type TakeFirstFn<O, B, E extends DbError, L extends ShapeLedger> = (
+  options?: AbortableQueryOptions,
+) => Promise<Result<O | undefined, ShapeUnion<E, L, B>>>;
+
+/** E-tracked `executeTakeFirstOrThrow`: no row resolves `Err(NoResultError)`
+ * (or the caller's `errorConstructor`) instead of throwing. */
+type TakeFirstOrThrowFn<O, B, E extends DbError, L extends ShapeLedger> = (
+  options?: ExecuteTakeFirstOrThrowOptions | ExecuteTakeFirstOrThrowOptions["errorConstructor"],
+) => Promise<Result<O, ShapeUnion<E, L, B> | NoResultError>>;
+
 /** Re-adds the overloaded chain forms the mapped type drops, per builder
  * family. Returns `WrappedKyselyBuilder<B>` (self) — the shape is unchanged
  * and the recursion keeps the overrides at every chain level. */
@@ -105,8 +135,10 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
         orderBy: <OE extends OrderByExpression<S, TB & keyof S, O>>(
           expr: OE,
         ) => WrappedKyselyBuilder<B, E, L>;
+        executeTakeFirst: TakeFirstFn<O, B, E, L>;
+        executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
       }
-    : B extends UpdateQueryBuilder<infer S, infer TB, any, any>
+    : B extends UpdateQueryBuilder<infer S, infer TB, infer O, any>
       ? {
           where: WhereFn<B, S, TB & keyof S, E, L>;
           and: WhereFn<B, S, TB & keyof S, E, L>;
@@ -117,24 +149,38 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
           rightJoin: JoinFn<B, S, TB & keyof S, E, L>;
           innerJoin: JoinFn<B, S, TB & keyof S, E, L>;
           fullJoin: JoinFn<B, S, TB & keyof S, E, L>;
+          executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
         }
-      : B extends DeleteQueryBuilder<infer S, infer TB, any>
+      : B extends DeleteQueryBuilder<infer S, infer TB, infer O>
         ? {
             where: WhereFn<B, S, TB & keyof S, E, L>;
             and: WhereFn<B, S, TB & keyof S, E, L>;
             or: WhereFn<B, S, TB & keyof S, E, L>;
             orWhere: WhereFn<B, S, TB & keyof S, E, L>;
+            executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
           }
-        : {};
+        : B extends InsertQueryBuilder<any, any, infer O>
+          ? {
+              executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
+            }
+          : B extends MergeQueryBuilder<any, any, infer O>
+            ? {
+                executeTakeFirstOrThrow: TakeFirstOrThrowFn<O, B, E, L>;
+              }
+            : {};
 
 /** A Kysely builder with its terminal E-tracked and the overloaded chain
  * forms restored at every chain level. The mapping instantiates only
  * method-level generics — Kysely's chain methods return the same class
  * parameters, so row types stay precise. */
 export type WrappedKyselyBuilder<B, E extends DbError, L extends ShapeLedger> = {
-  [K in keyof B as K extends "execute" | keyof Promise<unknown> ? never : K]: B[K] extends (
-    ...args: infer A
-  ) => infer R
+  [K in keyof B as K extends
+    | "execute"
+    | "executeTakeFirst"
+    | "executeTakeFirstOrThrow"
+    | keyof Promise<unknown>
+    ? never
+    : K]: B[K] extends (...args: infer A) => infer R
     ? R extends { execute: (...args: any[]) => PromiseLike<unknown> }
       ? (...args: A) => WrappedKyselyBuilder<R, E, L>
       : B[K]
@@ -220,6 +266,46 @@ const wrapKysely = (db: unknown, config: TryDbConfig<DbError> | undefined): unkn
       },
     });
   };
+
+  /** The `executeTakeFirst` family: same classification + retry as `execute`,
+   * via the underlying `executeTakeFirst` (which never throws for no row).
+   * `executeTakeFirstOrThrow` maps the no-row case to `Err(NoResultError)`
+   * — or the caller's `errorConstructor` — so Kysely's only throw becomes a
+   * value on the wrapped surface. */
+  const takeFirstTerminals: BuilderTerminals = {
+    executeTakeFirst: (target, args) => {
+      const takeFirstTarget = target as { executeTakeFirst(...a: unknown[]): PromiseLike<unknown> };
+      const run = () => takeFirstTarget.executeTakeFirst(...args);
+      return wrapExecute(run);
+    },
+    executeTakeFirstOrThrow: (target, args) => {
+      const takeFirstTarget = target as { executeTakeFirst(...a: unknown[]): PromiseLike<unknown> };
+      const resultPromise = wrapExecute(() => takeFirstTarget.executeTakeFirst(...args)) as Promise<
+        Result<unknown, DbError>
+      >;
+      return resultPromise.then((result) => {
+        if (result.isOk() && result.value === undefined) {
+          const first = args[0];
+          // `errorConstructor` may be passed directly (Kysely's overload) or
+          // inside options; the shape is Kysely's own — asserted once here.
+          const errorConstructor: ExecuteTakeFirstOrThrowOptions["errorConstructor"] | undefined =
+            typeof first === "function"
+              ? (first as ExecuteTakeFirstOrThrowOptions["errorConstructor"])
+              : first !== null && typeof first === "object" && "errorConstructor" in first
+                ? (first as ExecuteTakeFirstOrThrowOptions).errorConstructor
+                : undefined;
+          const ctor = errorConstructor ?? NoResultError;
+          const nodeProvider = target as { toOperationNode(): QueryNode };
+          const error = isNoResultErrorConstructor(ctor)
+            ? new ctor(nodeProvider.toOperationNode())
+            : ctor(nodeProvider.toOperationNode());
+          return Result.err(error);
+        }
+        return result;
+      });
+    },
+  };
+
   return new Proxy(db as object, {
     get(target, key) {
       const value = Reflect.get(target, key);
@@ -237,7 +323,8 @@ const wrapKysely = (db: unknown, config: TryDbConfig<DbError> | undefined): unkn
         key === "updateTable" ||
         key === "deleteFrom"
       ) {
-        return (...args: unknown[]) => wrapBuilder(value.apply(target, args), wrapExecute);
+        return (...args: unknown[]) =>
+          wrapBuilder(value.apply(target, args), wrapExecute, takeFirstTerminals);
       }
       return value;
     },

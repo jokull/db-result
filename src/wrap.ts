@@ -45,32 +45,46 @@ export type WrappedBuilder<B, E extends DbError, L extends ShapeLedger> = {
 export const isBuilder = (value: unknown): boolean =>
   !!value && typeof (value as { execute?: unknown }).execute === "function";
 
+/** Optional per-method terminals: methods whose results are NOT builders but
+ * still need the E-track (e.g. Kysely's `executeTakeFirst` family). Each
+ * terminal receives the target builder and the call args and returns the
+ * wrapped outcome. */
+export type BuilderTerminals = Record<string, (target: object, args: unknown[]) => unknown>;
+
 /** Wraps a builder so `execute`/`then`/`catch`/`finally` resolve to
- * `Result`, and chain methods keep returning wrapped builders. */
+ * `Result`, chain methods keep returning wrapped builders, and any
+ * `terminals` methods get the E-track instead of passing through raw. */
 export const wrapBuilder = (
   builder: unknown,
   wrapExecute: (execute: (...args: unknown[]) => unknown) => unknown,
+  terminals?: BuilderTerminals,
 ): unknown => {
   if (builder === null || typeof builder !== "object") return builder;
   return new Proxy(builder as object, {
     get(target, key) {
+      // Duck-typed proxy internals: the target is `object` here and the
+      // builder contract is exactly "has an execute function" — asserted
+      // once per branch into a named const instead of per member access.
+      const executable = target as { execute: (...a: unknown[]) => unknown };
       if (key === "execute") {
-        return (...args: unknown[]) =>
-          wrapExecute(() => (target as { execute: (...a: unknown[]) => unknown }).execute(...args));
+        return (...args: unknown[]) => wrapExecute(() => executable.execute(...args));
       }
       if (key === "then" || key === "catch" || key === "finally") {
-        return (...args: unknown[]) => {
-          const run = () => (target as { execute: (...a: unknown[]) => unknown }).execute();
-          return (wrapExecute(run) as unknown as Record<string, (...a: unknown[]) => unknown>)[
-            key
-          ]!(...args);
-        };
+        // The wrapped Result is promise-shaped; re-route the protocol method.
+        const resultPromise = wrapExecute(() => executable.execute()) as unknown as Record<
+          string,
+          (...a: unknown[]) => unknown
+        >;
+        return (...args: unknown[]) => resultPromise[key]!(...args);
+      }
+      if (terminals && typeof key === "string" && key in terminals) {
+        return (...args: unknown[]) => terminals[key]!(target, args);
       }
       const value = Reflect.get(target, key);
       if (typeof value === "function") {
         return (...args: unknown[]) => {
           const result = value.apply(target, args);
-          return isBuilder(result) ? wrapBuilder(result, wrapExecute) : result;
+          return isBuilder(result) ? wrapBuilder(result, wrapExecute, terminals) : result;
         };
       }
       return value;

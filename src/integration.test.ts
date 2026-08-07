@@ -1,6 +1,7 @@
 /**
  * Real-driver integration proof — one suite per engine, each gated on its
- * DSN (skipped when unset):
+ * DSN (skipped when unset). Docker engines: node-postgres (pg) and
+ * postgres.js both use PGTEST_DSN; mysql2 and mssql each have their own:
  *
  *   docker compose up -d --wait
  *   PGTEST_DSN="postgres://postgres:postgres@127.0.0.1:5433/postgres" \
@@ -13,12 +14,13 @@ import { describe, expect, test } from "bun:test";
 import pg from "pg";
 import mysql from "mysql2/promise";
 import mssql from "mssql";
-import { tryDb } from "./src/db-result.ts";
+import postgres from "postgres";
+import { tryDb } from "./db-result.ts";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { drizzleTryDb } from "./src/drizzle.ts";
-import { kyselyTryDb } from "./src/kysely.ts";
-import { prismaTryDb } from "./src/prisma.ts";
+import { drizzleTryDb } from "./drizzle.ts";
+import { kyselyTryDb } from "./kysely.ts";
+import { prismaTryDb } from "./prisma.ts";
 import { Kysely, PostgresDialect } from "kysely";
 import { PrismaClient } from "@prisma/client";
 
@@ -140,6 +142,55 @@ describePg("real node-postgres", () => {
     expect(auth.isErr()).toBe(true);
     if (auth.isErr()) expect(auth.error._tag).toBe("db/authentication-failed");
     await badPool.end();
+  });
+});
+
+// ─── postgres.js ─────────────────────────────────────────────────────────────
+
+describePg("real postgres.js", () => {
+  test("selects classify to Ok", async () => {
+    const sql = postgres(process.env.PGTEST_DSN!);
+    try {
+      const rows = await tryDb(() => sql`SELECT 1 AS n`);
+      expect(rows.isOk()).toBe(true);
+      if (rows.isOk()) {
+        expect(rows.value.length).toBe(1);
+        expect(rows.value[0]?.n).toBe(1);
+      }
+    } finally {
+      await sql.end();
+    }
+  });
+
+  test("unique-violation classifies with the constraint name", async () => {
+    const sql = postgres(process.env.PGTEST_DSN!);
+    try {
+      await sql`DROP TABLE IF EXISTS pgjs_users`;
+      await sql`
+        CREATE TABLE pgjs_users (
+          id SERIAL PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE
+        )`;
+      const first = await tryDb(() => sql`INSERT INTO pgjs_users (email) VALUES (${"a@b.com"})`);
+      expect(first.isOk()).toBe(true);
+
+      const dupe = await tryDb(() => sql`INSERT INTO pgjs_users (email) VALUES (${"a@b.com"})`);
+      expect(dupe.isErr()).toBe(true);
+      if (dupe.isErr()) {
+        expect(dupe.error._tag).toBe("db/unique-violation");
+        expect((dupe.error as { constraint?: string }).constraint).toBe("pgjs_users_email_key");
+      }
+    } finally {
+      await sql.end();
+    }
+  });
+
+  test("connection failures classify to db/connect-failure", async () => {
+    const sql = postgres("postgres://postgres:postgres@127.0.0.1:1/postgres", { max: 1 });
+    const fail = await tryDb(() => sql`SELECT 1`);
+    expect(fail.isErr()).toBe(true);
+    if (fail.isErr()) expect(fail.error._tag).toBe("db/connect-failure");
+    await sql.end();
   });
 });
 

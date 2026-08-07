@@ -84,7 +84,7 @@ driver Drizzle supports maps to one of the five subpaths:
 Code-stripping paths (aws-data-api, xata-http, netlify-db, planetscale,
 tidb, the `*-proxy` drivers) classify from their message text — the
 constraint/auth/syntax patterns in the classifier cover them (fixtures in
-`test.db-result.ts`).
+`src/classify/message.test.ts`).
 
 **Turso Database vs libsql** — two different engines. `libsql` (what
 `@libsql/client`, `drizzle-orm/libsql`, and the hosted Turso product use) is
