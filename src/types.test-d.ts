@@ -73,6 +73,9 @@ type ErrOf<R> = R extends Promise<Result<unknown, infer E>> ? E : never;
 /** The error union of a Result promise VALUE (already-called method). */
 type ErrOfPromise<R> = R extends Promise<Result<unknown, infer E>> ? E : never;
 
+/** The ok value of a Result promise VALUE (already-called method). */
+type OkOfPromise<R> = R extends Promise<Result<infer T, unknown>> ? T : never;
+
 /** The ok value of a `Result` promise: `Promise<Result<T, E>>` → `T`. */
 type OkOf<R> = R extends Promise<Result<infer T, unknown>> ? T : never;
 
@@ -446,8 +449,42 @@ class Missing extends Error {
 const ktfClass = ksel.executeTakeFirstOrThrow({ errorConstructor: Missing });
 type _kt16 = Assert<Member<Missing, ErrOfPromise<typeof ktfClass>> extends true ? true : false>;
 
-// ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
+// ─── relational queries — the read-shape E-track (sqlite db, blog pattern) ─
 
+import { defineRelations } from "drizzle-orm";
+import { sqliteTable as rTable, text as rText, integer as rInteger } from "drizzle-orm/sqlite-core";
+import { drizzle as bunDrizzle } from "drizzle-orm/bun-sqlite";
+import { Database } from "bun:sqlite";
+
+const rPosts = rTable("r_posts", { slug: rText("slug").primaryKey(), title: rText("title") });
+const rComments = rTable("r_comments", {
+  id: rInteger("id").primaryKey(),
+  postSlug: rText("post_slug"),
+});
+const rRelations = defineRelations({ rPosts, rComments }, (r) => ({
+  rPosts: {
+    comments: r.many.rComments({ from: r.rPosts.slug, to: r.rComments.postSlug }),
+  },
+}));
+declare const rClient: Database;
+const sdb = bunDrizzle({ client: rClient, relations: rRelations });
+const wrappedSqlite = drizzleTryDb(sdb);
+
+// builders on a sqlite db work too (the wrapper is driver-agnostic)…
+const sIns = wrappedSqlite.insert(rPosts).values({ slug: "a", title: "b" });
+type _rel0 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof sIns.execute>>> extends true ? true : false
+>;
+// …and relational reads E-track with the READ union (constraints excluded).
+const relMany = wrappedSqlite.query.rPosts.findMany({ orderBy: { title: "asc" } });
+type _rel1 = Assert<Absent<Unique, ErrOfPromise<typeof relMany>> extends true ? true : false>;
+type _rel2 = Assert<Member<Data, ErrOfPromise<typeof relMany>> extends true ? true : false>;
+type _rel3 = Assert<Member<undefined, OkOfPromise<typeof relMany>> extends true ? false : true>;
+const relOne = wrappedSqlite.query.rPosts.findFirst({ where: { slug: "x" } });
+type _rel4 = Assert<Member<undefined, OkOfPromise<typeof relOne>> extends true ? true : false>;
+type _rel5 = Assert<Absent<Unique, ErrOfPromise<typeof relOne>> extends true ? true : false>;
+
+// ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
 import { prismaTryDb } from "./prisma.ts";
 import { PrismaClient } from "@prisma/client";
 
