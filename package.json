@@ -1,7 +1,6 @@
 {
   "name": "db-result",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "description": "Database failures as better-result tagged errors — Result<T, DbError>, retry-safe, driver-agnostic.",
   "keywords": [
     "better-result",
@@ -26,6 +25,7 @@
     "url": "git+https://github.com/jokull/db-result.git"
   },
   "files": [
+    "CHANGELOG.md",
     "dist"
   ],
   "type": "module",
