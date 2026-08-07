@@ -42,7 +42,6 @@ import {
   type DefaultLedger,
   type ShapeExclusions,
   type ShapeLedger,
-  type ShapeUnion,
   type TryDbConfig,
 } from "./db-result.js";
 import { isBuilder, wrapBuilder, type BuilderTerminals, type WrappedBuilder } from "./wrap.js";
