@@ -119,6 +119,13 @@ type JoinFn<B, S, TB extends keyof S, E extends DbError, L extends ShapeLedger> 
  * semantics (minus the absent-row `undefined`). */
 type SingleResultOf<B> = ExecR<B> extends readonly unknown[] ? ExecR<B>[number] : ExecR<B>;
 
+/** A Kysely SELECT builder (the literal `isSelectQueryBuilder` brand) — only
+ * selects can be absent; the four mutation builders always produce their
+ * result when non-returning. The ROW SHAPE can't decide this: a select row
+ * like `{ numDeletedRows: bigint }` matches `DeleteResult` structurally, so
+ * a shape check would wrongly omit `undefined`/`NoResultError` (codex P2). */
+type IsSelectish<B> = B extends { isSelectQueryBuilder: true } ? true : false;
+
 /** E-tracked `executeTakeFirst`, mirroring Kysely's `SimplifySingleResult`:
  * the four mutation result types are never `undefined` — only row-shaped
  * outputs can be absent. */
@@ -126,9 +133,11 @@ type TakeFirstFn<B, E extends DbError, L extends ShapeLedger> = (
   options?: AbortableQueryOptions,
 ) => Promise<
   Result<
-    SingleResultOf<B> extends InsertResult | UpdateResult | DeleteResult | MergeResult
-      ? SingleResultOf<B>
-      : SingleResultOf<B> | undefined,
+    IsSelectish<B> extends true
+      ? SingleResultOf<B> | undefined
+      : SingleResultOf<B> extends InsertResult | UpdateResult | DeleteResult | MergeResult
+        ? SingleResultOf<B>
+        : SingleResultOf<B> | undefined,
     ShapeUnion<E, L, B>
   >
 >;
@@ -174,9 +183,11 @@ type TakeFirstOrThrowFn<B, E extends DbError, L extends ShapeLedger> = <
 ) => Promise<
   Result<
     SingleResultOf<B>,
-    SingleResultOf<B> extends InsertResult | UpdateResult | DeleteResult | MergeResult
-      ? ShapeUnion<E, L, B>
-      : ShapeUnion<E, L, B> | NoResultErrorFor<O2>
+    IsSelectish<B> extends true
+      ? ShapeUnion<E, L, B> | NoResultErrorFor<O2>
+      : SingleResultOf<B> extends InsertResult | UpdateResult | DeleteResult | MergeResult
+        ? ShapeUnion<E, L, B>
+        : ShapeUnion<E, L, B> | NoResultErrorFor<O2>
   >
 >;
 

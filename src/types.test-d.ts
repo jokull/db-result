@@ -612,6 +612,20 @@ type _kt23 = Assert<
 type _kt24 = Assert<
   Absent<NoResultError, ErrOfPromise<typeof ktfoDel>> extends true ? true : false
 >;
+// codex fifth-pass P2: a SELECT whose row structurally matches a mutation
+// result (DeleteResult) must still be treated as a select — the builder
+// brand decides, not the row shape: `undefined` stays, NoResultError stays.
+declare const kdbDel: Kysely<{ users: { numDeletedRows: bigint } }>;
+const kDelShaped = kyselyTryDb(kdbDel).selectFrom("users").selectAll();
+type _kt25 = Assert<
+  Member<undefined, OkOf<ReturnType<typeof kDelShaped.executeTakeFirst>>> extends true
+    ? true
+    : false
+>;
+const ktfoDelShaped = kDelShaped.executeTakeFirstOrThrow();
+type _kt26 = Assert<
+  Member<NoResultError, ErrOfPromise<typeof ktfoDelShaped>> extends true ? true : false
+>;
 
 // ─── relational queries — the read-shape E-track (sqlite db, blog pattern) ─
 
@@ -667,6 +681,15 @@ const sInsPh = wrappedSqlite
   .values({ slug: drizzleSql.placeholder("s"), title: "b" });
 type _relExpr2 = Assert<
   Member<Unique, ErrOf<ReturnType<typeof sInsPh.execute>>> extends true ? true : false
+>;
+// codex fifth-pass P1: a COLUMN is not a valid insert value (it implements
+// getSQL — the expression stand-in must exclude it; raw drizzle rejects it)
+// @ts-expect-error — columns are not insert values
+const _sInsCol = wrappedSqlite.insert(rPosts).values({ slug: rPosts.slug });
+// …but a column reference IS a valid update set source:
+const sUpdCol = wrappedSqlite.update(rPosts).set({ title: rPosts.title }).where(undefined);
+type _relExpr3 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof sUpdCol.execute>>> extends true ? true : false
 >;
 // ISSUES.md #1: wrapped chains must keep drizzle's precise rows through
 // zero-arg `.returning()` — not the degraded Record<string, unknown>[].

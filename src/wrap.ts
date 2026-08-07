@@ -56,11 +56,23 @@ export type DrizzleExpr =
   | { getSQL: (...args: any[]) => unknown }
   | { mapWith: (...args: any[]) => unknown };
 
+/** INSERT-value expressions exclude COLUMNS: a column also implements
+ * `getSQL()`, but raw drizzle rejects columns as insert values (they bind as
+ * scalars — `undefined` → NULL), while UPDATE sets allow them. Columns carry
+ * a `_` slot with `data`; SQL/Placeholder do not. (`brand` is a shared
+ * discriminator so the all-optional `data` exclusion isn't a weak type.) */
+export type InsertExpr = DrizzleExpr & { _?: { data?: never; brand?: unknown } };
+
 /** Drizzle's write-object shape: per-column values may be SQL expressions
  * or placeholders (mirrors drizzle's own `SQLiteInsertValue` / update-set
  * shape — the strict `$inferInsert` re-type in the mapped chain rejected
- * expression-valued writes; codex #9). */
-export type InsertValueOf<I> = { [K in keyof I]: I[K] | DrizzleExpr };
+ * expression-valued writes; codex #9). Insert values exclude columns;
+ * update sets keep them (a column reference is a valid `set` source). */
+export type InsertValueOf<I> = { [K in keyof I]: I[K] | InsertExpr };
+
+/** UPDATE-set shape: same per-column union, but COLUMNS are allowed (a
+ * column reference is a valid `set` source — `set({ count: other.count })`). */
+export type SetValueOf<I> = { [K in keyof I]: I[K] | DrizzleExpr };
 
 /** A selected field's row data type — structural extraction from drizzle's
  * shapes (columns carry `_` with `data`/`notNull`, SQL expressions carry
@@ -161,8 +173,8 @@ export type WrappedBuilder<
               ? TTable extends { $inferInsert: infer I }
                 ? // same re-typing for the update set — the constraint
                   // instantiation accepts invalid update objects; per-column
-                  // expressions stay allowed
-                  (update: Partial<InsertValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
+                  // expressions AND column references stay allowed
+                  (update: Partial<SetValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
                 : (...args: A) => WrappedBuilder<R, E, L, TTable>
               : (...args: A) => WrappedBuilder<R, E, L, TTable>
         : B[K]
