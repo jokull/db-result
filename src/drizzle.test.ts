@@ -25,6 +25,12 @@ const makeDb = (queryOverrides: Record<string, unknown> = {}) => {
   return {
     select: () => ({ from: () => ({ execute: async () => [{ id: 1 }] }) }),
     insert: () => ({
+      // mssql-style pre-execute intermediate: output() returns a builder
+      // with only `values` (no execute) — the runtime must keep wrapping it.
+      output: () => ({
+        values: () => ({ execute: async () => [{ id: 1 }] }),
+        execute: async () => [{ id: 1 }],
+      }),
       values: () => ({
         returning: () => ({ execute: async () => [{ id: 1 }] }),
         execute: async () => [{ id: 1 }],
@@ -40,6 +46,11 @@ const makeDb = (queryOverrides: Record<string, unknown> = {}) => {
     execute: async () => ({ rows: [] }),
     with: () => ({
       select: () => ({ from: () => ({ execute: async () => [] }), execute: async () => [] }),
+      // with-insert is also a pre-execute intermediate (values before execute).
+      insert: () => ({
+        values: () => ({ execute: async () => [{ id: 1 }] }),
+        execute: async () => [{ id: 1 }],
+      }),
     }),
     query: relational,
     $with: () => ({}),
@@ -109,6 +120,24 @@ describe("drizzleTryDb — builders, transaction, execute", () => {
     const wrapped = drizzleTryDb(makeDb() as never) as any;
     const result = await wrapped.with("x").select().from("posts").execute();
     expect(result.isOk()).toBe(true);
+  });
+
+  test("with().insert() E-tracks through the pre-execute intermediate", async () => {
+    // the with-insert builder has `values` but no `execute` until the values
+    // call — the runtime must keep it wrapped or the chain escapes the proxy
+    const wrapped = drizzleTryDb(makeDb() as never) as any;
+    const result = await wrapped.with("x").insert("posts").values({}).execute();
+    expect(result.isOk()).toBe(true);
+    expect(result.value).toEqual([{ id: 1 }]);
+  });
+
+  test("mssql-style output chain E-tracks through the pre-execute intermediate", async () => {
+    // output() returns a builder without `execute` (codex P1) — wrapping it
+    // keeps the values→execute chain on the Result path
+    const wrapped = drizzleTryDb(makeDb() as never) as any;
+    const result = await wrapped.insert("posts").output().values({}).execute();
+    expect(result.isOk()).toBe(true);
+    expect(result.value).toEqual([{ id: 1 }]);
   });
 
   test("$with and refreshMaterializedView pass through raw", async () => {

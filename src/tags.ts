@@ -100,37 +100,54 @@ export type DbError =
 // Per-tag checks are the classes' OWN static `is` (inherited from
 // `TaggedErrorClass`) — `UniqueViolation.is(e)` narrows to `UniqueViolation`,
 // the same better-result idiom as `TaggedError.is` / `err.match`. Only the
-// FAMILY predicates (unions of tags) stay as functions, built on the statics.
+// FAMILY predicates (unions of tags) stay as functions — and they read the
+// TAG, not the prototype: a serialized / cross-realm / plain tagged error
+// still matches the boundary, and an unknown tag never does (pinned by
+// tags.test.ts). Per-tag precision is the class static's job (instanceof);
+// the family guards are the coarse boundary.
+
+const DB_ERROR_TAGS = [
+  "db/unique-violation",
+  "db/foreign-key-violation",
+  "db/not-null-violation",
+  "db/check-violation",
+  "db/data-error",
+  "db/deadlock",
+  "db/lock-timeout",
+  "db/transaction-aborted",
+  "db/connect-failure",
+  "db/connection-lost",
+  "db/authentication-failed",
+  "db/authorization-failed",
+  "db/sql-syntax-error",
+  "db/query-failure",
+] as const;
+
+const DB_ERROR_TAG_SET: ReadonlySet<string> = new Set(DB_ERROR_TAGS);
+
+/** True when `e` is a plain object carrying exactly this `_tag`. */
+const hasTag = (e: unknown, tag: string): boolean =>
+  typeof e === "object" && e !== null && (e as { _tag?: unknown })._tag === tag;
 
 /** Family guard — any of the four constraint tags. */
 export const isConstraintViolation = (e: unknown): e is ConstraintViolation =>
-  UniqueViolation.is(e) ||
-  ForeignKeyViolation.is(e) ||
-  NotNullViolation.is(e) ||
-  CheckViolation.is(e);
+  hasTag(e, "db/unique-violation") ||
+  hasTag(e, "db/foreign-key-violation") ||
+  hasTag(e, "db/not-null-violation") ||
+  hasTag(e, "db/check-violation");
 
 /** Family guard — either connection tag. `db/connect-failure` is a
  * connect-phase failure (safe to retry); `db/connection-lost` is ambiguous
  * mid-query loss (never auto-retried). */
 export const isConnectionFailure = (e: unknown): e is ConnectFailure | ConnectionLost =>
-  ConnectFailure.is(e) || ConnectionLost.is(e);
+  hasTag(e, "db/connect-failure") || hasTag(e, "db/connection-lost");
 
 /** True when `e` is any of the fourteen `DbError` tags — the boundary check. */
 export const isDbError = (e: unknown): e is DbError =>
-  UniqueViolation.is(e) ||
-  ForeignKeyViolation.is(e) ||
-  NotNullViolation.is(e) ||
-  CheckViolation.is(e) ||
-  DataError.is(e) ||
-  DeadlockError.is(e) ||
-  LockTimeoutError.is(e) ||
-  TransactionAborted.is(e) ||
-  ConnectFailure.is(e) ||
-  ConnectionLost.is(e) ||
-  AuthenticationFailed.is(e) ||
-  AuthorizationFailed.is(e) ||
-  SqlSyntaxError.is(e) ||
-  QueryFailure.is(e);
+  typeof e === "object" &&
+  e !== null &&
+  typeof (e as { _tag?: unknown })._tag === "string" &&
+  DB_ERROR_TAG_SET.has((e as { _tag: string })._tag);
 
 /** A `DbError` that survived its retries — carries the attempt count. */
 export type RetriedDbError = DbError & { retries: number };

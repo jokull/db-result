@@ -171,8 +171,22 @@ export type WrappedBuilder<
     execute: (...args: any[]) => Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>>;
   };
 
-export const isBuilder = (value: unknown): boolean =>
-  !!value && typeof (value as { execute?: unknown }).execute === "function";
+/** A builder-shaped value: has `execute` (executable) or one of the known
+ * pre-execute entry methods (`values` / `set` / `from` — Drizzle's
+ * insert/update/select intermediates before the terminal call, e.g. the
+ * mssql `output()` result). Chain results must be wrapped even before
+ * they're executable, or the E-track dies at the first intermediate and the
+ * rest of the chain runs raw (codex P1). */
+export const isBuilder = (value: unknown): boolean => {
+  if (value === null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.execute === "function" ||
+    typeof v.values === "function" ||
+    typeof v.set === "function" ||
+    typeof v.from === "function"
+  );
+};
 
 /** Optional per-method terminals: methods whose results are NOT builders but
  * still need the E-track (e.g. Kysely's `executeTakeFirst` family). Each
