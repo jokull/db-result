@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createClient } from "@libsql/client";
+import type { Result } from "better-result";
 import {
   tryDb,
   tryTx,
@@ -1243,31 +1244,82 @@ describe("prisma protocol — engine P-codes", () => {
   });
 });
 
-describe("transaction-shaped thunks — param-typed tryDb", () => {
-  test("a thunk with a transaction-shaped param disables statement auto-retry", async () => {
+describe("builder values — the shape carrier and the retry unit", () => {
+  test("a builder value retries by re-executing the builder", async () => {
     let attempts = 0;
-    const result = await tryDb((tx: { isTransaction: true }) => {
-      void tx;
-      attempts += 1;
-      throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
-    });
-    expect(attempts).toBe(1); // inside a transaction: no statement retry
-    if (result.isErr()) expect(result.error._tag).toBe("db/deadlock");
+    // Structural stand-in for a query builder (Kysely/Drizzle emit these);
+    // the call is cast because the shape lattice rejects unproven shapes —
+    // the runtime path is what's under test.
+    const builder = {
+      execute: () => {
+        attempts += 1;
+        if (attempts < 3) {
+          return Promise.reject(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
+        }
+        return Promise.resolve({ rowCount: 1 });
+      },
+    };
+    const result = await (tryDb as unknown as (q: unknown) => Promise<Result<unknown, DbError>>)(
+      builder,
+    );
+    expect(attempts).toBe(3); // re-executed per attempt, like a re-invoked thunk
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value).toEqual({ rowCount: 1 });
   });
 
-  test("an explicit retry still wins for in-transaction statements", async () => {
+  test("a builder value does not retry deterministic failures", async () => {
     let attempts = 0;
-    const result = await tryDb(
-      (tx: { rollback(): never }) => {
-        void tx;
+    const builder = {
+      execute: () => {
         attempts += 1;
-        if (attempts < 2) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
-        return "ok";
+        return Promise.reject(
+          Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+            code: "SQLITE_CONSTRAINT_UNIQUE",
+          }),
+        );
       },
-      { retry: { times: 3, delayMs: 1, backoff: "constant" } },
+    };
+    const result = await (tryDb as unknown as (q: unknown) => Promise<Result<unknown, DbError>>)(
+      builder,
     );
+    expect(attempts).toBe(1);
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error._tag).toBe("db/unique-violation");
+  });
+
+  test("an explicit retry still wins over the default policy", async () => {
+    let attempts = 0;
+    const builder = {
+      execute: () => {
+        attempts += 1;
+        if (attempts < 2) {
+          return Promise.reject(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
+        }
+        return Promise.resolve("ok");
+      },
+    };
+    const result = await (
+      tryDb as unknown as (
+        q: unknown,
+        c: { retry: { times: number; delayMs: number; backoff: "constant" } },
+      ) => Promise<Result<unknown, DbError>>
+    )(builder, { retry: { times: 3, delayMs: 1, backoff: "constant" } });
     expect(attempts).toBe(2);
     expect(result.isOk()).toBe(true);
+  });
+});
+
+describe("promise form — one-shot, no auto-retry", () => {
+  test("a settled promise is never re-run", async () => {
+    let runs = 0;
+    const settled = Promise.resolve().then(() => {
+      runs += 1;
+      throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    });
+    const result = await tryDb(settled);
+    expect(runs).toBe(1); // one-shot: no retry, no re-await
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error._tag).toBe("db/deadlock");
   });
 });
 

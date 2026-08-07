@@ -45,29 +45,38 @@ await tryDb(q, { signal }); // AbortSignal forwarded to every attempt + delay
 An explicit `retry` always wins — and the safe gate is injected even then: a
 custom policy without `shouldRetry` still won't retry a unique violation.
 
-## The thunk rule
+## What can be retried
 
-**The thunk form is required for retry to function.** `tryDb(promise)` can't
-re-run a settled promise — retries would re-await the same outcome forever (dev
-builds warn once). Keep the thunk to the SQL statement; it runs once per
-attempt, so hoist `await`-ed work and narrowed variables out of it:
+Retry re-runs the query once per attempt:
+
+- **Builder values re-execute** — `tryDb(db.selectFrom("users").selectAll())`
+  re-runs the builder on each attempt. The builder is the retry unit.
+- **Thunks re-invoke** — `tryDb(() => db.insert(users).values({ email }).returning())`
+  re-runs the closure. This is the form for one-shot calls (Prisma, raw SQL)
+  that can't be re-executed.
+- **Settled promises never retry** — a promise can't be re-run (dev builds
+  warn once). Wrap in a thunk to get retry.
 
 ```ts
-// ✅ retries re-run the INSERT
-await tryDb(() => db.insert(users).values({ email }).returning());
+// ✅ builder values and thunks retry
+await tryDb(db.selectFrom("users").selectAll());
+await tryDb(() => prisma.user.findMany({ where: { id } }));
 
-// ❌ retries re-await the SAME settled promise — can never succeed
-const p = db.insert(users).values({ email }).returning();
-await tryDb(p);
+// ❌ a settled promise is one-shot — no auto-retry
+const p = prisma.user.findMany({ where: { id } });
+await tryDb(p); // warns once; wrap in a thunk to get retry
 ```
+
+Keep the thunk to the SQL statement; it runs once per attempt, so hoist
+`await`-ed work and narrowed variables out of it.
 
 ## In-transaction statements
 
-A thunk that declares a transaction-client parameter is an _in-transaction
-statement_, and **statement-level auto-retry turns off** — retrying a statement
-inside an aborted transaction fights `25P02` ("current transaction is
-aborted"). An explicit `retry` still wins. Retrying the whole transaction is
-`tryTx`'s job: see [transactions.md](./transactions.md).
+There is no in-transaction statement form — statement retry inside a
+transaction is pointless (a failed statement aborts the transaction, so a
+"retried" statement fails again with `db/transaction-aborted`). Retry the whole
+transaction with `tryTx`, which restarts BEGIN: see
+[transactions.md](./transactions.md).
 
 ## Observability
 

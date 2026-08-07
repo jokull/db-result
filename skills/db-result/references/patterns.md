@@ -129,37 +129,37 @@ const user = row.value[0];
 if (!user) return Result.err(new NotFound({ id })); // your domain error
 ```
 
-## P7 — Declare the shape, narrow the union
+## P7 — Pass the builder, narrow the union
 
-The thunk's parameter type is evidence of what the query can and cannot do —
+The query builder's own type is evidence of what the query can and cannot do —
 `tryDb` narrows the error union to the tags that shape provably cannot produce
 (full lattice, probes, footgun and honest ceilings in
-[shapes.md](./shapes.md)). The parameter is a type-level declaration only:
-`tryDb` never passes an argument, so close over the real client in the body.
+[shapes.md](./shapes.md)). The builder IS the shape: the ORM emitted its type,
+so the evidence is verified by construction — nothing to declare, nothing to
+sync.
 
 ```ts
-// zero-arg: no evidence — full driver union, auto-retry on
-tryDb(() => db.selectFrom("users").selectAll().execute());
+// builder value: the shape IS the type — constraints are write-only
+tryDb(db.selectFrom("users").selectAll());
 
-// read shape: constraints + transaction-aborted gone from the union
-tryDb((q: SelectQueryBuilder<DB, "users", {}>) => db.selectFrom("users").selectAll().execute());
+// write builders: every constraint stays in the union
+tryDb(db.insertInto("users").values({ email }));
 
-// transaction shape: authn/connect-failure gone, retry off, tx-aborted stays
-tryDb((tx: Transaction<DB>) => tx.insertInto("users").values({ email }).execute());
+// delete builder: FK is the only constraint a DELETE can hit
+tryDb(db.deleteFrom("users").where("id", "=", id));
 
-// Prisma args: findMany args are provably read; where-only args narrow to
-// the delete set (FK stays — delete/deleteMany can FK-fail)
-tryDb((args: Prisma.UserFindManyArgs) => prisma.user.findMany(args));
+// one-shot calls (Prisma, raw SQL): the thunk form — full union, retry on
+tryDb(() => prisma.user.findMany({ where: { id } }));
 ```
 
-A one-arg thunk whose parameter proves nothing fails to compile on purpose —
-use the zero-arg form rather than guessing. Declaring any parameter turns
-statement auto-retry off (a transaction context must not re-run one statement
-on a dead transaction); an explicit `retry` still wins.
+A builder that proves no shape (raw SQL, Kysely `mergeInto`) fails to compile
+on purpose — use the thunk form rather than guessing. Builders retry by
+re-executing; thunks retry by re-invoking; settled promises never retry
+(one-shot).
 
 ## Pitfalls
 
-- **Passing a promise instead of a thunk** — retries re-await the same outcome.
+- **Passing a promise instead of a thunk** — the promise form never auto-retries (a settled promise can't re-run); wrap in a thunk to get retry.
 - **`constraint` is for observability, never control flow** — match on the tag.
 - **`INSERT OR IGNORE` / `INSERT OR REPLACE`** — swallow-everything and
   delete-then-insert traps; prefer `ON CONFLICT ... DO UPDATE`.

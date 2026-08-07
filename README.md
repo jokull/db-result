@@ -27,8 +27,9 @@ Built on [better-result](https://github.com/dmmulroy/better-result). You adopt i
 
   No `instanceof`, no `error.code === "23505"`.
 
-- **Narrow** the error union from the thunk's parameter type: declare a
-  `Transaction`, a `PgSelect`, a `UserFindManyArgs`, and the impossible tags compile out.
+- **Narrow** the error union from the query's own type: pass the builder value
+  (`db.select().from(users)`) and the impossible tags compile out. Nothing to
+  declare, nothing to sync — the ORM emitted the type, so the evidence is verified.
 - **Retry** only what's provably safe, with per-error backoff; never the deterministic
   errors, never the ambiguous mid-query connection loss (the write may have committed).
 - **Fold** at your handler boundary: match the tags you care about with
@@ -42,7 +43,7 @@ Built on [better-result](https://github.com/dmmulroy/better-result). You adopt i
 import { matchErrorPartial } from "better-result";
 import { tryDb } from "db-result/pg"; // or /sqlite /mysql2 /mssql /d1: subpath per driver
 
-const outcome = await tryDb(() => db.insert(users).values({ email }).returning());
+const outcome = await tryDb(db.insert(users).values({ email }).returning());
 
 if (outcome.isErr()) {
   return matchErrorPartial(
@@ -58,11 +59,20 @@ if (outcome.isErr()) {
 }
 ```
 
-**Pass a thunk, not a promise.** A settled promise can't re-run, so retries would
-re-await the same outcome and can never succeed (dev builds warn once). Pass
-`tryDb(() => …)`. Opt-in per call site: wrap one endpoint, leave the rest throwing.
-Transactions: wrap the whole `db.transaction()` in `tryTx` (whole-thunk retry) or
-statements in `tryDb((tx) => …)`. Details: [transactions](./skills/db-result/references/transactions.md).
+Three forms, one retry engine:
+
+- **Builder value** — `tryDb(db.select().from(users))`. The builder is both the
+  shape and the retry unit: the union narrows to what that shape provably cannot
+  raise, and retry re-executes the builder.
+- **Promise-returning thunk** — `tryDb(() => prisma.user.findMany(args))`. Full
+  union, retry re-invokes the thunk. The form for one-shot calls (Prisma, raw SQL,
+  `client.query`) that can't be re-executed.
+- **Settled promise** — `tryDb(promise)`. One-shot: full union, no auto-retry (dev
+  builds warn once; wrap in a thunk to get retry).
+
+Opt in per call site: wrap one endpoint, leave the rest throwing. Transactions:
+wrap the whole `db.transaction()` in `tryTx` (whole-thunk retry). Details:
+[transactions](./skills/db-result/references/transactions.md).
 
 ## The retry doctrine, in one breath
 
@@ -78,46 +88,41 @@ ours. Details: [retry](./skills/db-result/references/retry.md).
 
 ## Shape-aware types: the union narrows itself
 
-Declare the thunk's parameter; its type is evidence of what the query can and cannot
-do, and the impossible tags compile out of the union. **Probes** are declared
-parameters that double as type evidence. The thunk closes over the real client, so
-the parameter is never used at runtime:
+Pass the query builder itself. Its type is evidence of what the query can and cannot
+do, and the impossible tags compile out of the union. No declared types, no matching
+by hand: the ORM emitted the builder type, so the evidence is verified by
+construction.
 
 ```ts
-import type { SelectQueryBuilder, Transaction, DeleteQueryBuilder } from "kysely";
-import type { PgSelect } from "drizzle-orm/pg-core";
-import type { Prisma } from "@prisma/client";
+import { tryDb, tryTx } from "db-result/pg";
+import type { Kysely } from "kysely";
 
 interface DB {
   users: { id: number; email: string; name: string };
 }
+declare const db: Kysely<DB>;
 
-// zero-arg: the happy path; no evidence, all 14 tags, retry on
-tryDb(() => db.selectFrom("users").selectAll().execute());
-
-// select builder: constraints are write-only; unique/fk/not-null/check + tx-aborted gone
-tryDb((q: SelectQueryBuilder<DB, "users", {}>) => db.selectFrom("users").selectAll().execute());
+// builder value: the shape IS the type — constraints are write-only
+const rows = await tryDb(db.selectFrom("users").selectAll());
 //   ^? Result<User[], DbError minus { unique | fk | not-null | check | transaction-aborted }>
 //   deadlock stays (SELECT … FOR UPDATE); data-error stays (read conversions)
 
-// transaction client (any ORM): begin succeeded; authn/connect-failure gone,
-// statement retry off
-tryDb((tx: Transaction<DB>) => db.insertInto("users").values({ email }).execute());
-
-// drizzle and prisma probe the same way; plain calls classify without a probe
-tryDb((q: PgSelect) => db.select().from(users));
-tryDb((args: Prisma.UserFindManyArgs) => prisma.user.findMany({ where: { id } }));
-tryDb(() => prisma.user.create({ data: { email } })); // P2002 → db/unique-violation
+// write builders: every constraint stays in the union
+await tryDb(db.insertInto("users").values({ email }).returningAll());
 
 // delete builder: FK is the only constraint a DELETE can hit
-tryDb((q: DeleteQueryBuilder<DB, "users", {}>) =>
-  db.deleteFrom("users").where("id", "=", id).execute(),
+await tryDb(db.deleteFrom("users").where("id", "=", id));
+
+// one-shot calls (Prisma, raw SQL): the thunk form — full union, retry on
+await tryDb(() => prisma.user.create({ data: { email } })); // P2002 → db/unique-violation
+
+// transactions: wrap the whole thing — BEGIN can fail, so the full union is honest
+await tryTx(() =>
+  db.transaction().execute(async (tx) => {
+    /* … */
+  }),
 );
 ```
-
-`tryDb` never passes an argument: the parameter is `undefined` at runtime; its type
-is the only signal. Every example closes over the real client (`db`, `prisma`);
-declare the parameter, ignore it. Name it `_q` if your lint flags unused parameters.
 
 Then the fold terminal lists only what's left for the select shape above:
 
@@ -131,15 +136,14 @@ Then the fold terminal lists only what's left for the select shape above:
 };
 ```
 
-Structural probes only: no ORM imports, zero runtime cost (the probes compile away).
-Chained queries keep the probe: joins, `where`, `orderBy` aren't probe keys, so a
-realistic select still narrows. The zero-arg form is the happy path; reach for the
-probe when you want the terminal (the `matchErrorPartial` unhandled arm) to list
-exactly what's left. A one-arg thunk whose parameter proves no shape is a compile
-error, never a silent widening to the full union. The narrowing is an optimization
-you opt into by declaring the shape; a wrong declaration widens the union, never lies
-at runtime (the classifier stays honest regardless). Full lattice, footguns, and
-per-driver ledgers: [shapes](./skills/db-result/references/shapes.md).
+Chained queries keep the shape: joins, `where`, `orderBy` aren't probe keys, so a
+realistic select still narrows. A builder that proves no shape (raw SQL, Kysely's
+`mergeInto`) is a compile error — use the thunk form rather than guessing; the
+lattice never silently widens. Narrowing is structural only: no ORM imports, zero
+runtime cost (the probes compile away), and the runtime classifier is never
+affected — it stays honest for every shape, including the reads-that-write
+footgun. Full lattice, footguns, and per-driver ledgers:
+[shapes](./skills/db-result/references/shapes.md).
 
 ## Drivers
 
@@ -149,8 +153,8 @@ classifier reads protocol signals: SQLSTATE, SQLite codes, mysql errno, mssql nu
 Prisma P-codes). Your ORM name is not an entry point: Kysely-on-Postgres imports from
 `db-result/pg`, Drizzle-on-SQLite from `db-result/sqlite`. Drizzle: classification is
 wrapper-transparent (the cause chain reaches the driver error regardless of version);
-the narrowing probes are verified against 1.0+ (currently `1.0.0-rc.4`); on ~0.9
-use the zero-arg form. Full map: [adoption](./skills/db-result/references/adoption.md).
+the narrowing probes are verified against 1.0+ (currently `1.0.0-rc.4`); on ~0.9 use
+the thunk form. Full map: [adoption](./skills/db-result/references/adoption.md).
 
 ## Docs for agents (and humans who want details)
 

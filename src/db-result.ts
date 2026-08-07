@@ -724,13 +724,8 @@ const withCause = (error: DbError, cause: unknown): DbError => {
   return error;
 };
 
-/** Runs any database query and resolves the outcome as a thenable. */
-const runDbQuery = <T>(query: PromiseLike<T> | (() => PromiseLike<T> | T)): PromiseLike<T> | T =>
-  typeof query === "function" ? query() : query;
-
-/** Internal: may this classified error be auto-retried by the default policy? */
-const isRetrySafe = (error: DbError): boolean =>
-  (error as DbError & { retrySafe?: boolean }).retrySafe === true;
+/** Internal: may this classified error be auto-retried by the default policy? */ const isRetrySafe =
+  (error: DbError): boolean => (error as DbError & { retrySafe?: boolean }).retrySafe === true;
 
 /** Per-error retry delay — the "sensible defaults" behind retryTransient. */
 const retryDelay = (error: DbError, ctx: TryPromiseContext): number => {
@@ -764,41 +759,14 @@ export type TryDbConfig<E> = {
 
 // ─── Type-level shape lattice ────────────────────────────────────────────────
 
-/**
- * Duck-typed probe: is a thunk parameter a transaction client, across every
- * ORM with zero imports? Each branch is that ORM's own marker, probed
- * structurally:
- *
- *   - Kysely  — `isTransaction: true` (the literal getter on `Transaction<DB>`)
- *   - Drizzle — `rollback(): never` member on `PgAsyncTransaction`
- *   - Prisma  — raw-query surface (`$queryRaw`) minus `$transaction` (its
- *     `TransactionClient` is an `Omit` of the client — detected by absence)
- *
- * A parameter matching none of these is treated as a query client.
- */
-export type IsTxParam<T> = T extends { isTransaction: true }
-  ? true
-  : T extends { rollback(): never }
-    ? true
-    : "$queryRaw" extends keyof T
-      ? "$transaction" extends keyof T
-        ? false
-        : true
-      : false;
-
-/** `any` proves nothing — guards the lattice against untyped parameters. */
+/** `any` proves nothing — guards the lattice against untyped values. */
 type IsAny<T> = 0 extends 1 & T ? true : false;
 
-/** `never` proves nothing — an unannotated parameter is contextually typed
- * `never` from the overload constraint, so it must fail loudly too. */
+/** `never` proves nothing. */
 type IsNever<T> = [T] extends [never] ? true : false;
 
 /** Kysely `SelectQueryBuilder` — literal brand, exact for selects. */
 export type IsSelectBuilder<T> = "isSelectQueryBuilder" extends keyof T ? true : false;
-
-/** Kysely `Kysely<DB>` pool/connection client — `isTransaction: boolean`
- * accessor (the literal `true` was already claimed by `IsTxParam`). */
-export type IsPoolClient<T> = "isTransaction" extends keyof T ? true : false;
 
 /** Drizzle select — the select-only clause surface. `limit` is deliberately
  * absent: it is shared with the delete builder, so it is not evidence. */
@@ -839,118 +807,56 @@ export type IsUpdateBuilder<T> = "set" extends keyof T
     ? true
     : false;
 
-/** Delete builders and Prisma where-only args — `where()`/`where`, once
- * `values`/`set`/`from` and the Prisma write/read probes are ruled out by
- * the pipeline order. Honest for the whole Prisma where-only family: reads
- * (findUnique/findFirst) and deletes (delete/deleteMany) can neither raise
- * unique/not-null/check (constraints are write-only) nor FK except deletes —
- * so `Fk` stays in the union while the other constraints go. `RawBuilder`
- * and Kysely `MergeQueryBuilder` (which can raise constraints via
- * `thenInsert`) have no `where` → fall to opaque. */
+/** Delete builders — `where()`, once `values`/`set`/`from` are ruled out by
+ * the pipeline order. A DELETE can only FK-fail among the constraints, so
+ * `Fk` stays in the union while the other constraints go. `RawBuilder` and
+ * Kysely `MergeQueryBuilder` (which can raise constraints via `thenInsert`)
+ * have no `where` → fall to opaque. */
 export type IsDeleteBuilder<T> = "where" extends keyof T ? true : false;
 
-/** Prisma write args — `data` (create/update/createMany/updateMany args) or
- * `create`+`update` (upsert args). `data` is write-exclusive in Prisma's
- * args surface. */
-export type IsPrismaWriteArgs<T> = "data" extends keyof T
-  ? true
-  : "create" extends keyof T
-    ? "update" extends keyof T
-      ? true
-      : false
-    : false;
-
-/** Prisma read args — keys only reads carry (findMany `take`/`skip`/…,
- * groupBy `by`, aggregate `_count`/…). `orderBy` is deliberately absent
- * (Kysely's delete builder has it). `{ where }`-only args don't match — the
- * delete probe claims them (honestly: reads and deletes share the shape and
- * neither can raise the non-FK constraints). */
-export type IsPrismaReadArgs<T> = "take" extends keyof T
-  ? true
-  : "skip" extends keyof T
-    ? true
-    : "cursor" extends keyof T
-      ? true
-      : "distinct" extends keyof T
-        ? true
-        : "by" extends keyof T
-          ? true
-          : "_count" extends keyof T
-            ? true
-            : "_avg" extends keyof T
-              ? true
-              : "_sum" extends keyof T
-                ? true
-                : "_min" extends keyof T
-                  ? true
-                  : "_max" extends keyof T
-                    ? true
-                    : false;
-
 /** Every shape the lattice can prove. */
-export type DbShape = "transaction" | "pool" | "read" | "write" | "delete" | "opaque";
+export type DbShape = "read" | "write" | "delete" | "opaque";
 
 /**
- * The shape a parameter proves, in lattice order (most specific first). A
+ * The shape a query value proves, in lattice order (most specific first). A
  * probe firing is structural evidence the ORM emitted; a non-match falls
  * through to the next. `any`/unknown prove nothing — `"opaque"` — which the
  * caller turns into a compile error (fail-loud), never a silent full union.
  *
- * Order notes: the Prisma write/read probes run before the delete probe
- * because update/upsert/findMany args all carry `where`; the delete probe's
- * `where` is only honest once they are claimed. The update probe's `from`
+ * Order notes: the delete probe's `where` is only honest after the insert
+ * and update probes claimed `values`/`set`/`from`. The update probe's `from`
  * is only honest after the select probe claimed Drizzle `PgSelect` (which
  * also has `from`).
  */
-export type ShapeOfParam<T> =
+export type ShapeOfQuery<T> =
   IsAny<T> extends true
     ? "opaque"
     : IsNever<T> extends true
       ? "opaque"
-      : IsTxParam<T> extends true
-        ? "transaction"
-        : IsSelectBuilder<T> extends true
+      : IsSelectBuilder<T> extends true
+        ? "read"
+        : IsDrizzleSelect<T> extends true
           ? "read"
-          : IsPoolClient<T> extends true
-            ? "pool"
-            : IsDrizzleSelect<T> extends true
-              ? "read"
-              : IsInsertBuilder<T> extends true
-                ? "write"
-                : IsUpdateBuilder<T> extends true
-                  ? "write"
-                  : IsPrismaWriteArgs<T> extends true
-                    ? "write"
-                    : IsPrismaReadArgs<T> extends true
-                      ? "read"
-                      : IsDeleteBuilder<T> extends true
-                        ? "delete"
-                        : "opaque";
-
-type ParamOf<F> = F extends (arg: infer P) => any ? P : never;
-
-/** The shape a thunk's parameter proves — `"opaque"` when it proves nothing. */
-export type ShapeOf<F> = ShapeOfParam<ParamOf<F>>;
+          : IsInsertBuilder<T> extends true
+            ? "write"
+            : IsUpdateBuilder<T> extends true
+              ? "write"
+              : IsDeleteBuilder<T> extends true
+                ? "delete"
+                : "opaque";
 
 /**
  * The exclusion ledger — the "no lying types" contract. Each key lists the
  * tags that shape provably cannot produce **on this driver**, with the reason
  * inline. A tag stays in the union unless a shape proves it impossible; the
  * runtime classifier is never affected (narrowing is type-level only).
- * Drivers override entries where their protocol differs — see
- * `db-result/sqlite`, which keeps `connect-failure` inside transactions
- * (`ATTACH DATABASE` can still fire CANTOPEN mid-query).
+ * Drivers override entries where their protocol differs.
  */
 export interface ShapeLedger {
-  /** The callback runs after acquire + BEGIN: authn already succeeded and the
-   * channel is established. `transaction-aborted` stays (it can happen). */
-  transaction: DbError;
-  /** A fresh pool connection is never in an aborted-transaction state. */
-  pool: DbError;
   /** Pure reads cannot raise constraints. Footgun: "reads that write" (DML
    * CTEs, volatile functions, INSTEAD-OF triggers) CAN — the runtime still
    * classifies them correctly, the tag just falls to the fold terminal; use
-   * the zero-arg form for reads-with-writes. `transaction-aborted` is
+   * the thunk form for reads-with-writes. `transaction-aborted` is
    * impossible without a transaction. */
   read: DbError;
   /** Writes can raise every constraint; only transaction-state is excluded. */
@@ -961,8 +867,6 @@ export interface ShapeLedger {
 
 /** The ledger every driver starts from. */
 export interface DefaultLedger extends ShapeLedger {
-  transaction: AuthenticationFailed | ConnectFailure;
-  pool: TransactionAborted;
   read:
     | UniqueViolation
     | ForeignKeyViolation
@@ -974,52 +878,69 @@ export interface DefaultLedger extends ShapeLedger {
 }
 
 /** Tags a shape excludes, per the ledger. `"opaque"` excludes nothing. */
-export type ShapeExclusions<L extends ShapeLedger, S extends DbShape> = S extends "transaction"
-  ? L["transaction"]
-  : S extends "pool"
-    ? L["pool"]
-    : S extends "read"
-      ? L["read"]
-      : S extends "write"
-        ? L["write"]
-        : S extends "delete"
-          ? L["delete"]
-          : never;
+export type ShapeExclusions<L extends ShapeLedger, S extends DbShape> = S extends "read"
+  ? L["read"]
+  : S extends "write"
+    ? L["write"]
+    : S extends "delete"
+      ? L["delete"]
+      : never;
 
-/** The driver union `E` narrowed by what the thunk's shape provably cannot do. */
+/** The driver union `E` narrowed by what the query value provably cannot do. */
 export type ShapeUnion<E extends DbError, L extends ShapeLedger, F> = Exclude<
   E,
-  ShapeExclusions<L, ShapeOf<F>>
+  ShapeExclusions<L, ShapeOfQuery<F>>
 >;
 
-/** A thunk whose parameter proves a shape — else `never` (fail-loud). */
-type ShapeProven<F> = ShapeOf<F> extends "opaque" ? never : F;
+/** A query value that proves a shape — else `never` (fail-loud). */
+type ShapeProven<F> = ShapeOfQuery<F> extends "opaque" ? never : F;
 
-/** Query-shaped thunk — no parameters. */
-export type QueryThunk<T> = () => PromiseLike<T> | T;
-/**
- * One-parameter thunk — the parameter is a type-level shape signal ONLY:
- * `tryDb` never passes an argument (it is `undefined` at runtime), so the
- * declared parameter type is what the shape lattice reads. Close over the
- * real client/builder in the thunk body.
- */
-export type ParamThunk<T> = (arg: never) => PromiseLike<T> | T;
+/** A re-executable query builder — both the retry unit and the shape
+ * carrier. `execute` is matched as a property so method-style (Kysely,
+ * Drizzle async select) and property-style (Drizzle async writes) both
+ * qualify. */
+type BuilderQuery = { execute: (...args: any[]) => PromiseLike<unknown> };
+
+/** The result type a builder produces. Drizzle's builders carry it in their
+ * `_` slot — rc.4 declares `execute` as a `this`-derived property that
+ * inference can't follow, so the `_` slot is the reliable source; Kysely's
+ * `execute` infers directly. */
+type QueryResultOf<F> = F extends { _: { result: infer R } }
+  ? R
+  : F extends { execute: (...args: any[]) => PromiseLike<infer T> }
+    ? T
+    : never;
+
+/** Guards the thunk/promise overloads against builder values — pass a
+ * builder directly instead of wrapping it. */
+type NotBuilder<T> = T extends BuilderQuery ? never : T;
+
+/** Query-shaped thunk — no parameters, re-invoked once per retry attempt. */
+export type QueryThunk<T> = () => PromiseLike<T> | NotBuilder<T>;
 
 /**
  * The `tryDb` surface bound to a narrowed error union `E` and a shape ledger
- * `L`. The param-shaped overload comes first (arity variance): a thunk whose
- * parameter proves a shape — a transaction client, an ORM query builder, or
- * Prisma args — resolves to the shape-narrowed union. A one-arg thunk whose
- * parameter proves nothing fails to compile (fail-loud): the lattice never
- * silently degrades to the full union. Zero-arg thunks, promises and values
- * are query-shaped: full union, transient retry on.
+ * `L`. Three forms, in overload order:
+ *
+ *   1. A **query builder value** — the shape lattice reads the builder's own
+ *      type (Kysely's brands, Drizzle's clause surface) and narrows the
+ *      union to what that shape provably cannot produce. Auto-retry
+ *      re-executes the builder. A builder that proves no shape is a compile
+ *      error (fail-loud) — never a silent full union.
+ *   2. A **promise-returning thunk** — `tryDb` cannot see into the call, so
+ *      the union stays full; auto-retry re-invokes the thunk.
+ *   3. A **settled promise** — one-shot, so auto-retry is off (a dev warning
+ *      fires once); wrap in a thunk to get retry.
+ *
+ * Bare values and builders wrapped in thunks are compile errors.
  */
 export interface TryDbFor<E extends DbError, L extends ShapeLedger = DefaultLedger> {
-  <T, F extends ParamThunk<T>>(
+  <F extends BuilderQuery>(
     query: F & ShapeProven<F>,
     config?: TryDbConfig<E>,
-  ): Promise<Result<T, ShapeUnion<E, L, F>>>;
-  <T>(query: QueryThunk<T> | PromiseLike<T> | T, config?: TryDbConfig<E>): Promise<Result<T, E>>;
+  ): Promise<Result<QueryResultOf<F>, ShapeUnion<E, L, F>>>;
+  <T>(query: QueryThunk<T>, config?: TryDbConfig<E>): Promise<Result<T, E>>;
+  <T>(query: PromiseLike<T>, config?: TryDbConfig<E>): Promise<Result<T, E>>;
 }
 
 /** The `tryTx` surface bound to a narrowed error union `E`. */
@@ -1037,14 +958,13 @@ export interface TryTxFor<E extends DbError> {
  * own the policy (a safe gate is injected unless you provide `shouldRetry`),
  * or set `retryTransient: false` to disable auto-retry entirely.
  *
- * `txForm` — the thunk declared a parameter: it's an in-transaction statement,
- * so statement-level auto-retry is off (retrying inside an aborted transaction
- * fights `25P02`); an explicit `retry` still wins.
+ * Retry re-invokes the query per attempt: a builder is re-executed, a thunk
+ * re-called. A settled promise cannot be re-run — the promise form never
+ * auto-retries (a dev-mode warning fires once; `retryTransient: false`
+ * silences it).
  *
- * The thunk form is required for retry to function: a settled promise can't
- * re-run, so `tryDb(promise)` retries the same outcome forever (a dev-mode
- * warning fires once). Keep the thunk to the SQL statement — it runs once per
- * attempt, so hoist async work and narrowed values out of it.
+ * Keep the thunk to the SQL statement — it runs once per attempt, so hoist
+ * async work and narrowed values out of it.
  *
  * A failure that survived retries carries a non-enumerable attempt count —
  * see `isRetriedError` / `RetriedDbError`.
@@ -1055,8 +975,8 @@ export interface TryTxFor<E extends DbError> {
 const runDb = async <T>(
   query: PromiseLike<T> | (() => PromiseLike<T> | T),
   config: TryDbConfig<DbError> | undefined,
-  txForm: boolean,
 ): Promise<Result<T, DbError>> => {
+  const isPromiseForm = !isThunk(query) && !isBuilder(query);
   const retryConfig: RetryConfig<DbError> | undefined = config?.retry
     ? {
         signal: config.signal,
@@ -1065,20 +985,20 @@ const runDb = async <T>(
           shouldRetry: config.retry.shouldRetry ?? ((e) => isRetrySafe(e)),
         },
       }
-    : txForm || config?.retryTransient === false
+    : isPromiseForm || config?.retryTransient === false
       ? config?.signal
         ? { signal: config.signal }
         : undefined
       : { signal: config?.signal, retry: DEFAULT_RETRY };
 
-  if (typeof query !== "function" && retryConfig?.retry) warnPromiseForm();
+  if (isPromiseForm && config?.retryTransient !== false) warnPromiseForm();
 
   let attempts = 0;
   const result = await Result.tryPromise(
     {
       try: () => {
         attempts += 1;
-        return Promise.resolve(runDbQuery(query));
+        return Promise.resolve(resolveQuery(query));
       },
       catch: (cause: unknown): DbError => withCause(classify(cause), cause),
     },
@@ -1089,36 +1009,54 @@ const runDb = async <T>(
   return result;
 };
 
+/** A thunk (function) or a builder value (has `execute`), else a promise. */
+const isThunk = (query: unknown): query is () => unknown => typeof query === "function";
+const isBuilder = (query: unknown): boolean =>
+  !!query && typeof (query as { execute?: unknown }).execute === "function";
+
+/** Runs the query once: thunks are invoked, builders executed, promises
+ * awaited as-is. A thunk's return value is the result — a builder returned
+ * from a thunk is passed through untouched (the direct form is the typed
+ * one). */
+const resolveQuery = <T>(query: PromiseLike<T> | (() => PromiseLike<T> | T)): PromiseLike<T> | T =>
+  isThunk(query)
+    ? query()
+    : isBuilder(query)
+      ? (query as unknown as { execute: () => PromiseLike<T> }).execute()
+      : query;
+
 /**
  * Runs any database query and resolves the outcome as a `Result<T, DbError>`.
  *
- * The thunk's parameter decides both the error union and the retry policy:
- *   - `tryDb(() => db.insert(...).returning())` — zero-arg: the full driver
- *     union, transient failures auto-retry.
- *   - `tryDb((q) => ...)` — one-arg: the parameter's TYPE is the shape signal
- *     (see `ShapeOf` / `ShapeProven`). A transaction client (Kysely
- *     `Transaction`, Drizzle `PgAsyncTransaction`, Prisma `TransactionClient`)
- *     narrows the union to the connection-bound set and disables statement
- *     auto-retry (a dead transaction can't be revived by re-running one
- *     statement). An ORM query builder or Prisma args type narrows the union
- *     to what that shape provably cannot produce — a select excludes the
- *     constraint tags, a delete keeps only FK, and so on. A one-arg thunk
- *     whose parameter proves nothing fails to compile (fail-loud).
+ * The query's form decides both the error union and the retry policy:
+ *   - `tryDb(db.select().from(users))` — a builder value: the lattice reads
+ *     the builder's type (see `ShapeOfQuery` / `ShapeProven`) and narrows
+ *     the union to what that shape provably cannot produce — a select
+ *     excludes the constraint tags, a delete keeps only FK. Auto-retry
+ *     re-executes the builder.
+ *   - `tryDb(() => db.insert(...).returning())` — a promise-returning thunk:
+ *     full union, auto-retry re-invokes the thunk. This is the form for
+ *     one-shot calls (Prisma, raw SQL) that can't be re-executed.
+ *   - `tryDb(somePromise)` — a settled promise: full union, no auto-retry
+ *     (one-shot; a dev warning fires once).
  *
- * Declaring a parameter disables statement auto-retry at runtime (the arity
- * is the only runtime signal); an explicit `retry` still wins.
+ * A builder that proves no shape fails to compile (fail-loud) — the lattice
+ * never silently degrades to the full union.
  */
-export function tryDb<T, F extends ParamThunk<T>>(
+export function tryDb<F extends BuilderQuery>(
   query: F & ShapeProven<F>,
   config?: TryDbConfig<DbError>,
-): Promise<Result<T, ShapeUnion<DbError, DefaultLedger, F>>>;
+): Promise<Result<QueryResultOf<F>, ShapeUnion<DbError, DefaultLedger, F>>>;
 export function tryDb<T>(
-  query: QueryThunk<T> | PromiseLike<T> | T,
+  query: QueryThunk<T>,
+  config?: TryDbConfig<DbError>,
+): Promise<Result<T, DbError>>;
+export function tryDb<T>(
+  query: PromiseLike<T>,
   config?: TryDbConfig<DbError>,
 ): Promise<Result<T, DbError>>;
 export function tryDb<T>(query: any, config?: TryDbConfig<DbError>): Promise<Result<T, DbError>> {
-  const txForm = typeof query === "function" && query.length > 0;
-  return runDb(query, config, txForm);
+  return runDb(query, config);
 }
 
 /**
@@ -1138,7 +1076,7 @@ export function tryDb<T>(query: any, config?: TryDbConfig<DbError>): Promise<Res
 export const tryTx = <T>(
   thunk: PromiseLike<T> | (() => PromiseLike<T> | T),
   config?: TryDbConfig<DbError>,
-): Promise<Result<T, DbError>> => runDb(thunk, config, false);
+): Promise<Result<T, DbError>> => runDb(thunk, config);
 
 /** Attaches the attempt count (non-enumerable) after a failure survived retries. */
 const markRetried = (error: DbError, attempts: number): void => {
@@ -1161,8 +1099,8 @@ const warnPromiseForm = (): void => {
   if (typeof process === "undefined" || process.env.NODE_ENV === "production") return;
   warnedPromiseForm = true;
   console.warn(
-    "[db-result] tryDb(promise): retries can't re-invoke a settled promise — the same outcome fails every attempt. " +
-      "Pass a thunk: tryDb(() => db.insert(...).returning()) so retries re-run the query.",
+    "[db-result] tryDb(promise): a settled promise can't re-run, so transient failures won't auto-retry. " +
+      "Pass a thunk (tryDb(() => prisma.user.findMany(args))) to get retry, or set retryTransient: false to silence this.",
   );
 };
 

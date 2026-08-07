@@ -1,7 +1,7 @@
 # Transactions
 
-Two shapes, distinguished by the **thunk's parameter** — the same signal the
-type system uses (see below).
+One surface: **`tryTx` — the whole transaction is the unit**. There is no
+in-transaction statement form; see below for why.
 
 ## Whole transaction — `tryTx`
 
@@ -54,60 +54,36 @@ DEFERRED` constraints report `23505`/`23503` on `COMMIT`, not on the INSERT —
    conflict or deadlock") is the transient to expect from interactive
    `$transaction` under contention — retried by `tryTx`'s whole-thunk policy.
 
-## In-transaction statement — `tryDb((tx) => …)`
+## Statements inside a transaction you already own
 
-Inside a transaction you already own (your own BEGIN…COMMIT, or an ORM
-transaction callback), wrap each statement with the parameter form. The
-parameter is your ORM's transaction client — the union carries
-`db/transaction-aborted` where the driver can produce it, and statement-level
-auto-retry is off:
+Inside an ORM transaction callback, statements run through the ORM's own `tx`
+client. There is **no one-arg `tryDb` form anymore** — the declared-parameter
+shape signal was unverifiable (the parameter is never passed, so a mismatched
+declaration narrowed the union against a query that never matched it). The
+honest options:
 
 ```ts
 const result = await db.transaction(async (tx) => {
-  const a = await tryDb((tx) => tx.insert(accounts).values({ id: from, amount: -x }).returning());
-  if (a.isErr()) return a; // rollback happens in db.transaction's catch
-  const b = await tryDb((tx) => tx.insert(accounts).values({ id: to, amount: x }).returning());
-  if (b.isErr()) return b;
-  return Result.ok(await tx.select().from(accounts).where(eq(accounts.id, from)));
+  // wrap the WHOLE transaction — retry restarts BEGIN (recommended)
+  return tryTx(() =>
+    db.transaction(async (tx) => {
+      await tx.insert(accounts).values({ id: from, amount: -x });
+      await tx.insert(accounts).values({ id: to, amount: x });
+    }),
+  );
 });
 ```
 
-Raw-driver equivalent: pass the transaction client you got from your pool's
-`connect()` + `BEGIN` — the parameter type is your signal, the runtime behavior
-(retry off) follows the declared arity.
-
-## Type-level detection — the duck-typed probe
-
-One function (`tryDb`), two overloads; the **thunk's parameter type** selects.
-Whole-function assignability cannot dispatch (arity variance), so the probe
-tests the _inferred parameter type_ structurally — zero ORM imports, works for
-any ORM:
-
-```ts
-export type IsTxParam<T> = T extends { isTransaction: true }
-  ? true // Kysely  Transaction<DB>
-  : T extends { rollback(): never }
-    ? true // Drizzle PgAsyncTransaction
-    : "$queryRaw" extends keyof T // Prisma: has raw surface…
-      ? "$transaction" extends keyof T
-        ? false
-        : true // …and lacks $transaction
-      : false;
-```
-
-- `tryDb(() => …)` — zero-arg → **query**: full union, transient retry on.
-- `tryDb((tx) => …)` — tx-client param → **in-transaction**: union +
-  `transaction-aborted` (per driver), statement retry off.
-- A one-arg thunk whose parameter is **not** a transaction client is a **compile
-  error** — no silent query misclassification. A new ORM's transaction client
-  that matches no probe branch fails the same way: add its marker to
-  `IsTxParam`.
-
-`tryTx` is the whole-transaction surface; it takes a zero-arg thunk.
+Per-statement `tryDb` inside a transaction still works via the thunk form
+(`tryDb(() => tx.insert(accounts).values({ … }))`), but statement retry is
+pointless there: a failed statement aborts the transaction, so a retried
+statement fails again with `db/transaction-aborted` (deterministic, no retry).
+Harmless, but not useful — retry the whole transaction instead.
 
 ## Savepoints
 
 No public API — Postgres savepoints are raw SQL (`SAVEPOINT` / `ROLLBACK TO`),
-Drizzle exposes them only as nested `tx.transaction()`. When you use them,
-classify each statement with `tryDb((tx) => …)` as above; a `ROLLBACK TO`
-clears the aborted state, so statements after it classify normally again.
+Drizzle exposes them only as nested `tx.transaction()`. A `ROLLBACK TO` clears
+the aborted state, so statements after it classify normally again; a nested
+`tx.transaction()` that fails aborts its own scope — classify it with
+`tryTx(() => tx.transaction(async (inner) => { /* … */ }))`.

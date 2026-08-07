@@ -3,7 +3,7 @@
  * is reachable (SQLSTATE covers constraints, auth, data errors, deadlocks,
  * lock timeouts, and `25P02` transaction aborts), so the union is the full
  * `DbError`. The narrow unions exist on the other subpaths. Shape narrowing
- * (thunk-parameter probes) applies on top via the default ledger.
+ * (query-builder probes) applies on top via the default ledger.
  */
 import {
   tryDb as coreTryDb,

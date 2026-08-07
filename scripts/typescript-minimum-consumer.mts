@@ -18,16 +18,13 @@ const r2: Promise<Result<number, DbError>> = tryDb(() => 1, {
   },
 });
 
-// the shape lattice compiles on the minimum TS: declared params narrow the
-// union (both assignable to the full Result, so this is a compile smoke)
-const r3 = tryDb((tx: { isTransaction: true }) => {
-  void tx;
-  return 1;
+// the shape lattice compiles on the minimum TS: a builder value narrows the
+// union (assignable to the full Result, so this is a compile smoke)
+const r3 = tryDb({ execute: () => Promise.resolve([1]) } as unknown as {
+  execute(): PromiseLike<number[]>;
+  groupBy(): unknown;
 });
-const r4 = tryDb(async (q: { groupBy(): unknown }) => {
-  void q;
-  return "read";
-});
+const r4 = tryDb(Promise.resolve("read"));
 
 const g = (e: unknown) =>
   isDbError(e)

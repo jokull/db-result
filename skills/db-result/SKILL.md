@@ -1,6 +1,6 @@
 ---
 name: db-result
-description: Database access with better-result — classify failures into 14 db/* tagged errors, retry only what is safe, run whole transactions, and let the thunk's parameter type narrow the error union per ORM shape. Use when writing code that touches a SQL driver or ORM (pg, postgres.js, mysql2, mssql, better-sqlite3, node:sqlite, bun:sqlite, libsql, D1, Drizzle, Kysely, Prisma) in a TypeScript project that uses or is adopting better-result — wrapping queries with tryDb, handling unique/foreign-key/connection/deadlock failures, writing ON CONFLICT or upsert logic, choosing retry behavior, starting or joining transactions, or deciding how not-found should be represented.
+description: Database access with better-result — classify failures into 14 db/* tagged errors, retry only what is safe, run whole transactions, and let the query builder's own type narrow the error union per ORM shape. Use when writing code that touches a SQL driver or ORM (pg, postgres.js, mysql2, mssql, better-sqlite3, node:sqlite, bun:sqlite, libsql, D1, Drizzle, Kysely, Prisma) in a TypeScript project that uses or is adopting better-result — wrapping queries with tryDb, handling unique/foreign-key/connection/deadlock failures, writing ON CONFLICT or upsert logic, choosing retry behavior, starting or joining transactions, or deciding how not-found should be represented.
 ---
 
 # db-result
@@ -58,18 +58,21 @@ assumes.
 - **Wrap with `tryDb`, fold with `matchErrorPartial`.** DB tags are private
   composition currency — never wire errors. Fold them into domain errors at the
   handler boundary.
-- **Pass a thunk, not a promise.** `tryDb(() => …)` — a settled promise can't
-  re-run, so retries would re-await the same outcome.
-- **The thunk's _parameter_ is the shape signal.** `tryDb((tx) => …)` where
-  `tx` is the ORM's transaction client (Kysely `Transaction`, Drizzle
-  `PgAsyncTransaction`, Prisma `TransactionClient`) means "I'm inside a
-  transaction": the union narrows to the connection-bound set and
-  statement-level auto-retry turns off. A parameter typed as an ORM query
-  builder or Prisma args narrows the union further — a select drops the
-  constraint tags, a delete keeps only FK. A one-arg thunk whose parameter
-  proves no shape is a compile error on purpose (fail-loud, never a silent
-  full union). See [`references/shapes.md`](./references/shapes.md) — the
-  lattice, the footgun, the honest ceilings.
+- **Pass the query builder, or a thunk.** A builder value
+  (`tryDb(db.selectFrom("users").selectAll())`) is both the retry unit and the
+  shape: the union narrows to what that shape provably cannot raise, and retry
+  re-executes the builder. A thunk (`tryDb(() => prisma.user.findMany(args))`)
+  gets the full union and retry by re-invoking — the form for one-shot calls
+  (Prisma, raw SQL). A settled promise never auto-retries (it can't re-run; a
+  dev warning fires once — wrap in a thunk to get retry).
+- **The builder's own type is the shape signal.** Nothing to declare, nothing
+  to sync: the ORM emitted the type, so the evidence is verified by
+  construction — a select drops the constraint tags, a delete keeps only FK.
+  A builder that proves no shape (raw SQL, Kysely `mergeInto`) is a compile
+  error on purpose (fail-loud, never a silent full union); a builder wrapped
+  in a thunk is a compile error too (pass it directly). See
+  [`references/shapes.md`](./references/shapes.md) — the lattice, the footgun,
+  the honest ceilings.
 - **Retrying is classified, not guessed.** Deterministic errors (constraints,
   auth, data) and ambiguous outcomes (connection lost mid-query, unknown commit
   outcome) are never auto-retried. The transient set is small and per-error.
