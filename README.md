@@ -146,10 +146,12 @@ affected — it stays honest for every shape, including the reads-that-write
 footgun. Full lattice, footguns, and per-driver ledgers:
 [shapes](./skills/db-result/references/shapes.md).
 
-## Commit to Result shapes: `drizzleTryDb`
+## Commit to Result shapes: the `{orm}TryDb` wrappers
 
 If you want the whole codebase on Result shapes — no `tryDb` at every call site,
-no thunks — wrap the drizzle client once:
+no thunks — wrap the ORM client once. One wrapper per ORM, each on the shared
+core: `drizzleTryDb` (`db-result/drizzle`), `kyselyTryDb` (`db-result/kysely`),
+`prismaTryDb` (`db-result/prisma`).
 
 ```ts
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -164,13 +166,24 @@ const [user] = outcome.value;
 ```
 
 One config, everywhere: builders re-execute on retry, `transaction` restarts
-whole, raw `execute` re-invokes. The wrapper owns the re-invocation, so there
-are no thunks at the call site. Two honest caveats: the wrapped chain types are
-structural, not literal — Drizzle's builder generics can't survive the type
-mapping, so rows degrade to `Record<string, any>`-shaped arrays while the union
-narrowing stays exact (drop to `tryDb(builder)` where row literals matter), and
-`query`/`$with` pass through raw. Tighten the union per protocol with the
-explicit generic: `drizzleTryDb<typeof db, SqliteDbError>(db)`.
+whole, raw `execute` re-invokes — the wrapper owns the re-invocation, so there
+are no thunks at the call site. Per ORM:
+
+- **drizzle** — builder chains E-track; the union narrows per builder shape;
+  rows degrade to `Record<string, any>`-shaped arrays (the mapped chain can't
+  preserve Drizzle's generics — drop to `tryDb(builder)` where row literals
+  matter); `query`/`$with` pass through raw.
+- **kysely** — builder chains E-track with the **rows staying precise**
+  (Kysely's chain methods return the same class parameters; the overloaded
+  `where`/`set`/`values`/join forms are re-added explicitly); `with(...)` CTE
+  chains pass through raw; transactions resolve at `transaction().execute(cb)`.
+- **prisma** — delegate calls, `$transaction` (interactive and batch), and raw
+  `$queryRaw` resolve to Result with a **full union** (Prisma has no builder
+  types to probe — nothing is narrowed, honestly); wrap the client after
+  `$extends`.
+
+Tighten the union per protocol with the explicit generic on any wrapper:
+`drizzleTryDb<typeof db, SqliteDbError>(db)`.
 
 ## Drivers
 

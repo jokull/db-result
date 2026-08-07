@@ -9,6 +9,8 @@ export default defineConfig({
     "src/drivers/mysql2.ts",
     "src/drivers/mssql.ts",
     "src/drizzle.ts",
+    "src/kysely.ts",
+    "src/prisma.ts",
   ],
   format: ["esm"],
   dts: {

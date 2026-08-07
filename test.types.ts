@@ -325,4 +325,85 @@ type _w14 = Assert<Same<typeof wrapped.$with, typeof db.$with> extends true ? tr
 import type { DrizzleTryDb } from "./src/drizzle.ts";
 type _w15 = Assert<DrizzleTryDb<typeof db, SqliteDbError> extends unknown ? true : false>;
 
+// ─── kyselyTryDb — the E-tracked wrapper ────────────────────────────────────
+
+import { kyselyTryDb } from "./src/kysely.ts";
+
+declare const kdb: Kysely<DB>;
+const kw = kyselyTryDb(kdb);
+
+// where-family 3-arg + rows stay precise (Kysely's chain methods return the
+// same class parameters):
+const ksel = kw.selectFrom("users").selectAll().where("id", "=", 1).orderBy("id");
+type KSelErr = ErrOf<ReturnType<typeof ksel.execute>>;
+type _kq1 = Assert<Absent<Unique, KSelErr> extends true ? true : false>;
+type _kq2 = Assert<Member<TxAborted, KSelErr> extends true ? true : false>;
+type KRow = Awaited<ReturnType<typeof ksel.execute>> extends Result<infer V, unknown> ? V : never;
+type _kq3 = Assert<KRow extends { id: number; email: string }[] ? true : false>;
+
+// insert (both values forms) + update set object:
+const kins = kw.insertInto("users").values({ id: 1, email: "a" });
+type _kq4 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof kins.execute>>> extends true ? true : false
+>;
+const kins2 = kw.insertInto("users").values([{ id: 1, email: "a" }]);
+type _kq5 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof kins2.execute>>> extends true ? true : false
+>;
+const kupd = kw.updateTable("users").set({ email: "x" }).where("id", "=", 1);
+type _kq6 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof kupd.execute>>> extends true ? true : false
+>;
+
+// delete: FK stays, unique gone.
+const kdel = kw.deleteFrom("users").where("id", "=", 1);
+type KDelErr = ErrOf<ReturnType<typeof kdel.execute>>;
+type _kq7 = Assert<Absent<Unique, KDelErr> extends true ? true : false>;
+type _kq8 = Assert<Member<Fk, KDelErr> extends true ? true : false>;
+
+// join key form:
+const kjoin = kw.selectFrom("users").leftJoin("users", "users.id", "users.id");
+type _kq9 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof kjoin.execute>>> extends true ? true : false
+>;
+
+// transaction + raw executeQuery: full union.
+const ktx = kw.transaction().execute(async (_tx) => "committed");
+type _kq10 = Assert<Same<ErrOf<typeof ktx>, DbError> extends true ? true : false>;
+const kraw = kw.executeQuery({ compile: () => ({ sql: "select 1", parameters: [] }) } as never);
+type _kq11 = Assert<Same<ErrOf<typeof kraw>, DbError> extends true ? true : false>;
+
+// ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
+
+import { prismaTryDb } from "./src/prisma.ts";
+import { PrismaClient } from "@prisma/client";
+
+// Type-only: never executed, so no DATABASE_URL is needed at construction.
+const pclient = new PrismaClient();
+const pw = prismaTryDb(pclient);
+
+// delegate calls: full union (Prisma never narrows), correct value types.
+const pfind = pw.user.findMany({ where: { email: "a" } });
+type _pq1 = Assert<Same<ErrOf<typeof pfind>, DbError> extends true ? true : false>;
+type _pq2 = Assert<Member<Unique, ErrOf<typeof pfind>> extends true ? true : false>;
+type PFindVal = Awaited<typeof pfind> extends Result<infer V, unknown> ? V : never;
+type _pq3 = Assert<PFindVal extends { id: number; email: string }[] ? true : false>;
+const pcreate = pw.user.create({ data: { email: "a" } });
+type _pq4 = Assert<Member<Unique, ErrOf<typeof pcreate>> extends true ? true : false>;
+
+// interactive transaction: whole-tx Result, inner statements E-tracked.
+const ptx = pw.$transaction(async (tx) => {
+  const r = await tx.user.create({ data: { email: "b" } });
+  type _pq5 = Assert<Member<Unique, ErrOfResult<typeof r>> extends true ? true : false>;
+  if (r.isErr()) return r;
+  return r.value;
+});
+type _pq6 = Assert<Same<ErrOf<typeof ptx>, DbError> extends true ? true : false>;
+
+// batch transaction + raw queries: full union.
+const pbatch = pw.$transaction([pcreate]);
+type _pq7 = Assert<Same<ErrOf<typeof pbatch>, DbError> extends true ? true : false>;
+const praw = pw.$queryRaw`SELECT 1`;
+type _pq8 = Assert<Same<ErrOf<typeof praw>, DbError> extends true ? true : false>;
+
 export {};

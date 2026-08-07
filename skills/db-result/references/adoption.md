@@ -37,13 +37,14 @@ narrow the _error union_ by protocol — same classifier, same retry engine:
 ORMs (Drizzle, Kysely, Prisma) have **no entry point of their own** for the
 classifier — import the driver subpath and wrap their queries; the classifier
 sees through their wrappers and P-codes structurally. One exception: the
-[`db-result/drizzle`](overview.md) **factory** (`drizzleTryDb`) is a per-ORM DX
-layer that wraps a drizzle client so every return shape carries the E-track —
-it is not a union entry point (the protocol still comes from your driver
-import). A query builder passed as a value narrows the union further per ORM
-(Kysely, Drizzle) — see [shapes](./shapes.md). Prisma delegate methods are
-one-shot (its `PrismaPromise` memoizes the executed query), so Prisma calls use
-the thunk form — see [transactions](./transactions.md).
+**`{orm}TryDb` factories** (`db-result/drizzle`, `db-result/kysely`,
+`db-result/prisma`) are per-ORM DX layers that wrap an ORM client so every
+return shape carries the E-track — they are not union entry points (the
+protocol still comes from your driver import). A query builder passed as a
+value narrows the union further per ORM (Kysely, Drizzle) — see
+[shapes](./shapes.md). Prisma delegate methods are one-shot (its
+`PrismaPromise` memoizes the executed query), so Prisma calls use the thunk
+form — see [transactions](./transactions.md).
 
 **Drizzle driver → import** — the classifier speaks _protocols_, so every
 driver Drizzle supports maps to one of the five subpaths:

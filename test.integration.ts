@@ -17,6 +17,10 @@ import { tryDb } from "./src/db-result.ts";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { drizzleTryDb } from "./src/drizzle.ts";
+import { kyselyTryDb } from "./src/kysely.ts";
+import { prismaTryDb } from "./src/prisma.ts";
+import { Kysely, PostgresDialect } from "kysely";
+import { PrismaClient } from "@prisma/client";
 
 const wrapUsers = pgTable("wrap_users", {
   id: integer("id").primaryKey(),
@@ -386,5 +390,124 @@ describeMssql("real mssql", () => {
     const auth = await tryDb(() => mssql.connect({ ...baseConfig(), password: "Wrong!Passw0rd" }));
     expect(auth.isErr()).toBe(true);
     if (auth.isErr()) expect(auth.error._tag).toBe("db/authentication-failed");
+  });
+});
+
+// ─── kyselyTryDb — the E-tracked wrapper ─────────────────────────────────────
+
+interface KyselyUsers {
+  id: number;
+  email: string;
+}
+interface KyselySchema {
+  kw_users: KyselyUsers;
+}
+
+describePg("kyselyTryDb — the E-tracked wrapper", () => {
+  test("wrapped select/insert/update/delete execute to Result with narrowing", async () => {
+    const pool = new pg.Pool({ connectionString: process.env.PGTEST_DSN });
+    try {
+      const client = await pool.connect();
+      await client.query("DROP TABLE IF EXISTS kw_users");
+      await client.query(
+        "CREATE TABLE kw_users (id SERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE)",
+      );
+      client.release();
+
+      const db = kyselyTryDb(new Kysely<KyselySchema>({ dialect: new PostgresDialect({ pool }) }));
+
+      const ins = await db.insertInto("kw_users").values({ id: 1, email: "a@b.c" }).execute();
+      expect(ins.isOk()).toBe(true);
+      const dupe = await db.insertInto("kw_users").values({ id: 2, email: "a@b.c" }).execute();
+      expect(dupe.isErr()).toBe(true);
+      if (dupe.isErr()) expect(dupe.error._tag).toBe("db/unique-violation");
+
+      const rows = await db
+        .selectFrom("kw_users")
+        .selectAll()
+        .where("email", "=", "a@b.c")
+        .execute();
+      expect(rows.isOk()).toBe(true);
+      if (rows.isOk()) expect(rows.value.length).toBe(1);
+
+      const upd = await db
+        .updateTable("kw_users")
+        .set({ email: "c@d.e" })
+        .where("email", "=", "a@b.c")
+        .execute();
+      expect(upd.isOk()).toBe(true);
+
+      const del = await db.deleteFrom("kw_users").where("email", "=", "c@d.e").execute();
+      expect(del.isOk()).toBe(true);
+
+      const tx = await db.transaction().execute(async (tx) => {
+        const r = await tx.insertInto("kw_users").values({ id: 3, email: "t@x.y" }).execute();
+        if (r.isErr()) return r;
+        return r.value;
+      });
+      expect(tx.isOk()).toBe(true);
+
+      const fake = kyselyTryDb({
+        selectFrom: () => ({
+          selectAll: () => ({
+            where: () => ({
+              execute: () => {
+                throw new Error("fake never called");
+              },
+            }),
+          }),
+        }),
+      } as never);
+      await pool.end();
+      void fake;
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  });
+});
+
+// ─── prismaTryDb — the E-tracked wrapper ─────────────────────────────────────
+
+describePg("prismaTryDb — the E-tracked wrapper", () => {
+  test("delegate calls and $transaction resolve to Result against real pg", async () => {
+    const pool = new pg.Pool({ connectionString: process.env.PGTEST_DSN });
+    const client = await pool.connect();
+    try {
+      await client.query('DROP TABLE IF EXISTS "User" CASCADE');
+      await client.query(`
+        CREATE TABLE "User" (
+          id SERIAL PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE,
+          age INTEGER,
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+        )`);
+      const prisma = new PrismaClient({ datasourceUrl: process.env.PGTEST_DSN });
+      const db = prismaTryDb(prisma);
+
+      const created = await db.user.create({ data: { email: "p@a.b" } });
+      expect(created.isOk()).toBe(true);
+      const dupe = await db.user.create({ data: { email: "p@a.b" } });
+      expect(dupe.isErr()).toBe(true);
+      if (dupe.isErr()) expect(dupe.error._tag).toBe("db/unique-violation");
+
+      const found = await db.user.findMany({ where: { email: "p@a.b" } });
+      expect(found.isOk()).toBe(true);
+      if (found.isOk()) expect(found.value.length).toBe(1);
+
+      const tx = await db.$transaction(async (tx) => {
+        const r = await tx.user.create({ data: { email: "q@c.d" } });
+        if (r.isErr()) return r;
+        return r.value;
+      });
+      expect(tx.isOk()).toBe(true);
+
+      const raw = await db.$queryRaw`SELECT 1 AS n`;
+      expect(raw.isOk()).toBe(true);
+
+      await prisma.$disconnect();
+    } finally {
+      await client.release();
+      await pool.end();
+    }
   });
 });

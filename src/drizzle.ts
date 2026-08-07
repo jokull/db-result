@@ -9,7 +9,7 @@
  * and shape narrowing applied internally.
  *
  *   - builders: retry re-executes the builder (the builder is the retry unit)
- *   - raw execute / relational results: retry re-invokes the method
+ *   - raw execute: retry re-invokes the method
  *   - transaction: retry restarts the whole transaction (tryTx semantics)
  *   - the union narrows per builder shape exactly like `tryDb(builder)`
  *
@@ -20,8 +20,9 @@
  *     narrowing, retry, and Result discipline survive; row literals do not.
  *     For row-exact types, drop to `tryDb(builder)` — same retry, same
  *     narrowing, Drizzle's own types.
- *   - `query` (relational) and `$with` pass through raw — relational results
- *     are promise-shaped; wrap them with `tryDb` if you want them E-tracked.
+ *   - `query` (relational), `$with`, and `refreshMaterializedView` pass
+ *     through raw — relational results are promise-shaped; wrap them with
+ *     `tryDb` if you want them E-tracked.
  *   - `values` accepts both the single-value and array forms (Drizzle
  *     overloads it; the mapped type would keep only the array form).
  *
@@ -35,9 +36,9 @@ import {
   type DbError,
   type DefaultLedger,
   type ShapeLedger,
-  type ShapeUnion,
   type TryDbConfig,
 } from "./db-result.js";
+import { isBuilder, wrapBuilder, type WrappedBuilder } from "./wrap.js";
 import type { Result } from "better-result";
 import type {
   PgAsyncDatabase,
@@ -58,39 +59,6 @@ import type {
 import type { SQLWrapper, WithSubquery } from "drizzle-orm";
 
 // ─── Type-level: the E-tracked surface ──────────────────────────────────────
-
-/** The result type a builder produces, from its own `_` slot (Drizzle's
- * declared result), falling back to its `execute` return. */
-type ExecR<B> = B extends { _: { result: infer R } }
-  ? R
-  : B extends { execute(...args: any[]): PromiseLike<infer R> }
-    ? R
-    : never;
-
-/** A builder whose `execute`/`then`/`catch`/`finally` resolve to
- * `Result<T, E>` and whose chain methods keep returning E-tracked builders.
- * The union narrows per builder shape via the ledger — exactly like
- * `tryDb(builder)`. Chain methods that return non-builder values keep their
- * original signatures. `values` is special-cased: Drizzle overloads it
- * (single value | array), and the mapped type would keep only the last
- * overload — the array-element union restores the single-object form. */
-type WrappedBuilder<B, E extends DbError, L extends ShapeLedger> = {
-  [K in keyof B as K extends "execute" | keyof Promise<unknown> ? never : K]: B[K] extends (
-    ...args: infer A
-  ) => infer R
-    ? R extends { execute: (...args: any[]) => PromiseLike<unknown> }
-      ? K extends "values"
-        ? A extends [infer V]
-          ? V extends readonly unknown[]
-            ? (value: V | V[number]) => WrappedBuilder<R, E, L>
-            : (...args: A) => WrappedBuilder<R, E, L>
-          : (...args: A) => WrappedBuilder<R, E, L>
-        : (...args: A) => WrappedBuilder<R, E, L>
-      : B[K]
-    : B[K];
-} & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {
-    execute: (...args: any[]) => Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>>;
-  };
 
 /** The wrapped db's query result kind (from the db's own type parameters). */
 type QueryResultOf<D> = D extends PgAsyncDatabase<infer TQR, any> ? TQR : PgQueryResultHKT;
@@ -173,48 +141,11 @@ export type DrizzleTryDb<
 
 // ─── Runtime: the proxy ─────────────────────────────────────────────────────
 
-const isBuilder = (value: unknown): boolean =>
-  !!value && typeof (value as { execute?: unknown }).execute === "function";
-const isThenable = (value: unknown): boolean =>
-  !!value && typeof (value as { then?: unknown }).then === "function";
-
-/** Wraps a builder so `execute`/`then`/`catch`/`finally` resolve to
- * `Result`, and chain methods keep returning wrapped builders. */
-const wrapBuilder = (builder: unknown, config: TryDbConfig<DbError> | undefined): unknown => {
-  if (builder === null || typeof builder !== "object") return builder;
-  return new Proxy(builder as object, {
-    get(target, key) {
-      if (key === "execute") {
-        return (...args: unknown[]) =>
-          tryDb(
-            () => (target as { execute: (...a: unknown[]) => unknown }).execute(...args),
-            config,
-          );
-      }
-      if (key === "then" || key === "catch" || key === "finally") {
-        return (...args: unknown[]) => {
-          const run = () => (target as { execute: (...a: unknown[]) => unknown }).execute();
-          return (tryDb(run, config) as unknown as Record<string, (...a: unknown[]) => unknown>)[
-            key
-          ]!(...args);
-        };
-      }
-      const value = Reflect.get(target, key);
-      if (typeof value === "function") {
-        return (...args: unknown[]) => {
-          const result = value.apply(target, args);
-          return isBuilder(result) ? wrapBuilder(result, config) : result;
-        };
-      }
-      return value;
-    },
-  });
-};
-
-/** Wraps a drizzle db: entry methods return E-tracked builders / Results;
- * everything else passes through raw. */
-const wrapDb = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown => {
+/** Wraps a drizzle db: the curated entry methods return E-tracked builders /
+ * Results; everything else passes through raw. */
+const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown => {
   if (db === null || typeof db !== "object") return db;
+  const wrapExecute = (run: () => unknown) => tryDb(run, config);
   return new Proxy(db as object, {
     get(target, key) {
       const value = Reflect.get(target, key);
@@ -232,10 +163,14 @@ const wrapDb = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown 
                     c?: PgTransactionConfig,
                   ) => PromiseLike<unknown>;
                 }
-              ).transaction((tx) => cb(wrapDb(tx, config)), txConfig),
+              ).transaction((tx) => cb(wrapDrizzle(tx, config)), txConfig),
             config,
           );
         };
+      }
+      if (key === "execute") {
+        return (...args: unknown[]) =>
+          tryDb(() => value.apply(target, args) as PromiseLike<unknown>, config);
       }
       if (key === "with") {
         return (...args: unknown[]) => {
@@ -245,7 +180,7 @@ const wrapDb = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown 
             const method = object[k] as (...a: unknown[]) => unknown;
             wrapped[k] = (...a: unknown[]) => {
               const result = method.apply(object, a);
-              return isBuilder(result) ? wrapBuilder(result, config) : result;
+              return isBuilder(result) ? wrapBuilder(result, wrapExecute) : result;
             };
           }
           return wrapped;
@@ -263,18 +198,9 @@ const wrapDb = (db: unknown, config: TryDbConfig<DbError> | undefined): unknown 
         key === "update" ||
         key === "delete"
       ) {
-        return (...args: unknown[]) => wrapBuilder(value.apply(target, args), config);
+        return (...args: unknown[]) => wrapBuilder(value.apply(target, args), wrapExecute);
       }
-      return (...args: unknown[]) => {
-        const result = value.apply(target, args);
-        if (isBuilder(result)) return wrapBuilder(result, config);
-        // raw execute / relational / $count: re-invoke per retry (a fresh
-        // thenable each attempt — a settled one can't re-run)
-        if (isThenable(result)) {
-          return tryDb(() => value.apply(target, args) as PromiseLike<unknown>, config);
-        }
-        return result;
-      };
+      return value;
     },
   });
 };
@@ -299,5 +225,5 @@ export function drizzleTryDb<D extends PgAsyncDatabase<any, any>, E extends DbEr
   db: D,
   config?: TryDbConfig<E>,
 ): DrizzleTryDb<D, E> {
-  return wrapDb(db, config as TryDbConfig<DbError> | undefined) as DrizzleTryDb<D, E>;
+  return wrapDrizzle(db, config as TryDbConfig<DbError> | undefined) as DrizzleTryDb<D, E>;
 }
