@@ -8,11 +8,6 @@
  */
 import type { DbError, ShapeLedger, ShapeUnion } from "./db-result.js";
 import type { Result } from "better-result";
-// Type-only: drizzle's SQL expression + placeholder types, for the write
-// arms (values/set accept expression-valued columns — codex #9). Erased at
-// build time; the runtime bundle has no drizzle dependency.
-import type { Placeholder, SQL } from "drizzle-orm";
-import type { Column, GetColumnData } from "drizzle-orm/column";
 
 /** The result type a builder produces, from its own `_` slot (Drizzle's
  * declared result) when present, falling back to its `execute` return.
@@ -51,25 +46,37 @@ export type ReturningAll<B, TTable> = TTable extends { $inferSelect: infer S }
     }
   : B;
 
+/** Structural stand-in for drizzle's expression types (SQL, Placeholder,
+ * Param) as write values: anything with `getSQL()` or `mapWith(...)` is
+ * accepted. DELIBERATELY not imported from drizzle-orm — the core package's
+ * published types stay drizzle-free, so a real consumer typechecking with
+ * `skipLibCheck: false` never pulls drizzle's declaration graph (rc.4's has
+ * its own errors — cockroach-core `config`, etc.). */
+export type DrizzleExpr =
+  | { getSQL: (...args: any[]) => unknown }
+  | { mapWith: (...args: any[]) => unknown };
+
 /** Drizzle's write-object shape: per-column values may be SQL expressions
  * or placeholders (mirrors drizzle's own `SQLiteInsertValue` / update-set
  * shape — the strict `$inferInsert` re-type in the mapped chain rejected
  * expression-valued writes; codex #9). */
-export type InsertValueOf<I> = { [K in keyof I]: I[K] | SQL | Placeholder };
+export type InsertValueOf<I> = { [K in keyof I]: I[K] | DrizzleExpr };
 
-/** A selected field's row data type — mirrors drizzle's `SelectResultField`
- * for the shapes the mapped chain sees (columns, SQL expressions, nested
- * records), so the `output`/`returning`-fields arms rebuild the result from
- * the CALL's fields type instead of drizzle's per-call inference (which
- * degrades through the mapped type under the native compiler; codex #12). */
-type FieldDataOf<F> =
-  F extends Column<any>
-    ? GetColumnData<F>
-    : F extends { _: { type: infer T } }
-      ? T
-      : F extends Record<string, any>
-        ? { [K in keyof F]: FieldDataOf<F[K]> }
-        : unknown;
+/** A selected field's row data type — structural extraction from drizzle's
+ * shapes (columns carry `_` with `data`/`notNull`, SQL expressions carry
+ * `_` with `type`, nested objects recurse), so the `output`/`returning`
+ * arms rebuild the result from the CALL's fields type instead of drizzle's
+ * per-call inference (which degrades through the mapped type under the
+ * native compiler; codex #12). */
+type FieldDataOf<F> = F extends { _: { data: infer D; notNull: infer N } }
+  ? N extends true
+    ? D
+    : D | null
+  : F extends { _: { type: infer T } }
+    ? T
+    : F extends Record<string, any>
+      ? { [K in keyof F]: FieldDataOf<F[K]> }
+      : unknown;
 
 /** The row shape a fields-projection produces: one data type per field. */
 export type OutputFieldsOf<F> = { [K in keyof F]: FieldDataOf<F[K]> };
