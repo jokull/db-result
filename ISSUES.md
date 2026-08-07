@@ -173,6 +173,61 @@ Consumers: use `tryDb(rawDb…)` for fields projections until fixed.
 
 ---
 
+## 8. Sync-backend transactions break atomicity (codex P1, third pass)
+
+**Status: OPEN — blocks release.** The wrapped `transaction` accepts a
+`PromiseLike` callback unconditionally (`src/drizzle.ts` runtime passes an
+async callback). On SYNCHRONOUS backends (bun:sqlite, better-sqlite3) the
+driver commits when the callback returns its promise — the wrapped
+statements inside resolve AFTER the commit — a mid-transaction failure
+produces an outer `Err` with the earlier writes committed. The type must
+mirror the source db's transaction callback return (`D["transaction"]`
+constraint): async backends keep `PromiseLike`; sync backends force a sync
+callback (the wrapped surface's Promise-returning statements then become
+unusable inside a tx — effectively rejecting wrapped tx on sync drivers).
+The blog (D1, async) is unaffected.
+
+## 9. Expression-valued writes rejected (codex P2, third pass)
+
+**Status: OPEN.** The #7 `$inferInsert`/`Partial<I>` re-typing accepts only
+model values — raw drizzle's insert/update sources also permit
+`SQL | Placeholder` (and columns for update). `values({ id: sql\`...\` })` /
+`set({ count: sql\`...\` })` now fail. Fix: union each column type with
+drizzle's `SQL`/`Placeholder` while still filtering unknown keys.
+
+## 10. `selectDistinctOn` one-arg overload lost (codex P2, third pass)
+
+**Status: OPEN.** The #4 fix dropped `| []`, but the mapped `infer A`
+captures the LAST overload (the 2-arg pg form), so the valid
+`selectDistinctOn([users.id])` errors "Expected 2 arguments". Fix: preserve
+both overloads (make `fields` optional) without the zero-arg form.
+
+## 11. `with` surface drops overloads and the table generic (codex P2, third pass)
+
+**Status: OPEN.** The mapped `with` surface erases drizzle's overloads and
+the call-site table generic: `wrapped.with(cte).select()` requires fields;
+`wrapped.with(cte).insert(table).values(...)` exposes `values` as `never`
+(no `TTable` reaches `WrappedBuilder`). Fix: re-express the with factories
+and thread the table like the top-level methods.
+
+## 12. SQL Server `output` result types (codex P2, third pass)
+
+**Status: OPEN.** `db.insert(t).output().values(...)` resolves
+`Result<never, …>` — only `returning` is reconstructed; mssql's `output`
+chain loses its executable result type. Fix: result tracking for `output`.
+
+---
+
+# Third-pass codex verdict (2026-08-07)
+
+The mapped-chain wrapper has a long regression tail: three codex passes over
+the same base surfaced 12 findings total (all type-surface except #8, which
+is a runtime atomicity issue on sync backends). #1-#7 are FIXED; #8-#12 are
+open. **0.1.1 remains blocked** — #8 must be resolved before release (the
+blog/D1 is async and unaffected, but the published surface is).
+
+---
+
 ## 7. Wrapped write-chain args (`values`/`set`) were constraint-instantiated (codex P1, second pass)
 
 **Status: FIXED** — the `values` arm re-types from the threaded table's
@@ -182,6 +237,29 @@ client. Root cause: `ReturnType<D["insert"]>` instantiates drizzle's
 generic factory without `TTable`, so the mapped chain's `values`/`set`
 params degraded to the constraint — the `TTable` threading only reached
 the zero-arg `returning()` arm. Same family as #1/#2.
+
+---
+
+## 7. Wrapped `set()` payload rejects SQL expressions (blog dogfood)
+
+**Status: OPEN — follow-up** (blog now uses a value-based revision instead).
+
+**Symptom:** `db.update(t).set({ revision: sql\`${t.revision} + 1\` })` fails to
+typecheck — `Type 'SQL<unknown>' is not assignable to type 'number'`. Drizzle's
+raw `UpdateSet` accepts SQL expressions for any column; the wrapped builder's
+`set` arm (`K extends "set" ? (update: Partial<I>) => …`) types the payload as
+`Partial<TTable["$inferInsert"]>`, which drops that allowance.
+
+**Fix direction:** the `set` arm should accept drizzle's own update payload
+shape (`UpdateSet`-ish — column value or `SQL`), not `Partial<I>`. The blog
+worked around it with a value-based `existing.revision + 1`, which is
+equivalent under the WHERE revision guard but lost the atomic SQL increment in
+the one place without a guard.
+
+**Note:** only surfaced under `yield* Result.await(db.update(...).set(...))`;
+the same chain under `Result.unwrap(await ...)` inferred through a different
+path and accepted it. Inference into the wrapped builder is fragile — worth a
+look while touching `set`.
 
 ---
 
