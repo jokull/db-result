@@ -24,23 +24,39 @@ tryDb(() => prisma.user.findMany({ where: { id } }));
 2. **A tag stays unless a shape proves it impossible.** The union only shrinks.
    An unproven tag staying is safe (conservative); a wrongly-removed tag is a
    lie.
-3. **Fail-loud, never silent.** A builder value that proves no shape (raw SQL,
-   Kysely `mergeInto`) is a compile error — the lattice never silently
-   degrades to the full union. A builder wrapped in a thunk is also a compile
-   error: pass it directly. Use the thunk form when there is genuinely no
-   shape (one-shot calls).
+3. **Fail-loud for builder values, never silent.** A builder value that
+   proves no shape (raw SQL, Kysely `mergeInto`, DDL) is a compile error —
+   the lattice never silently degrades to the full union. A builder wrapped
+   in a thunk is also a compile error: pass it directly. Thenables without
+   `execute` (Drizzle `$count`, relational queries, `db.execute` raw) match
+   the promise overload instead — full union, no narrowing, never a lie.
 4. **The ledger is per driver.** The default exclusions hold on every driver;
    a driver's union is narrower where its protocol differs (`db-result/sqlite`
    drops `authentication-failed`, `deadlock`, `transaction-aborted` outright).
 
 ## The shape lattice
 
-| shape    | what the builder proves                    | probes (structural markers)                                                                               | excluded tags (default ledger)                                                                                                                                    |
-| -------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `read`   | a select builder                           | `isSelectQueryBuilder: true` (Kysely); `groupBy\|having\|offset\|union\|intersect\|except\|for` (Drizzle) | the four constraints + `transaction-aborted`. `deadlock`/`lock-timeout` stay (`SELECT … FOR UPDATE`), `data-error` stays (read conversions), connection tags stay |
-| `write`  | an insert/update builder                   | `values` / `onConflictDo*` (insert), `set` / `from` (update)                                              | `transaction-aborted` only — writes can raise every constraint                                                                                                    |
-| `delete` | a delete builder                           | `where` — after the insert/update probes ruled `values`/`set`/`from` out                                  | `unique`, `not-null`, `check`, `transaction-aborted` — a DELETE can only FK-fail                                                                                  |
-| `opaque` | no evidence (`any`, `unknown`, raw, merge) | —                                                                                                         | nothing — the full driver union; opaque builder values fail loudly                                                                                                |
+| shape    | what the builder proves                         | probes (structural markers)                                                                               | excluded tags (default ledger)                                                                                                                                      |
+| -------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read`   | a select builder                                | `isSelectQueryBuilder: true` (Kysely); `groupBy\|having\|offset\|union\|intersect\|except\|for` (Drizzle) | the four constraints. `deadlock`/`lock-timeout` stay (`SELECT … FOR UPDATE`), `data-error` stays (read conversions), connection tags and `transaction-aborted` stay |
+| `write`  | an insert/update builder                        | `values` / `onConflictDo*` (insert), `set` / `from` (update)                                              | nothing — writes can raise every tag, including `transaction-aborted` when the builder is bound to a transaction                                                    |
+| `delete` | a delete builder                                | `where` AND `returning` — after the insert/update probes ruled `values`/`set`/`from` out                  | `unique`, `not-null`, `check` — a DELETE can only FK-fail; `transaction-aborted` stays                                                                              |
+| `opaque` | no evidence (`any`, `unknown`, raw, DDL, merge) | —                                                                                                         | nothing — the full driver union; opaque builder values fail loudly                                                                                                  |
+
+## Why `transaction-aborted` is never excluded
+
+A tx-bound builder — `tx.insertInto(...)` inside `db.transaction(tx => …)`,
+Kysely or Drizzle — can raise `25P02` after **any** prior failed statement in
+the transaction, or after an in-transaction deadlock (and the library's own
+retry re-executes the builder, so a retried deadlock lands on `25P02`). The
+tx client returns the _same builder types_ as the root client — verified
+against the ORM sources (Kysely `Transaction<DB> extends Kysely<DB>`, Drizzle
+`PgAsyncTransaction extends PgAsyncDatabase`) — so no probe can detect
+transaction binding. Excluding `transaction-aborted` from any shape would be
+a compile-time lie in every transaction; the tag stays in every union
+(conservative for standalone statements, honest for tx-bound ones). This was
+found adversarially — see `adversarial-ledger.md` (Kysely rows 1-3/24,
+Drizzle rows V1-V3).
 
 ## The footgun: "reads that write"
 
@@ -86,12 +102,22 @@ union.
   error; use the thunk form).
 - **Kysely `RawBuilder` / `db.executeQuery(Compilable)`** — the SQL is
   arbitrary → opaque.
+- **Kysely DDL builders (`CreateIndexBuilder`, …)** — `CreateIndexBuilder` has
+  a `where` (partial-index predicate) and `execute`, so it would probe as a
+  delete — but `CREATE UNIQUE INDEX` raises 23505. The delete probe requires
+  `where` AND `returning`; DDL has no `returning` → opaque (compile error; use
+  the thunk form). Found adversarially (Kysely ledger row 20).
+- **Drizzle rc.4 `.where()` strips the delete probe** — Drizzle's
+  method-exclusion typing removes `where` from the builder after it is called,
+  so a where'd delete probes opaque (full union). The delete shape only fires
+  on the bare `db.delete(t)`. Conservative, never a lie.
+- **Drizzle rc.4 write builders** declare `execute` as a `this`-derived
+  property; the result type is read from the builder's own `_` slot
+  (`QueryResultOf`). The probes still fire — writes narrow to the (now empty)
+  write exclusion = full union, with the correct result type.
 - **Prisma** — every delegate method is one-shot (its `PrismaPromise`
   memoizes the executed query; re-awaiting never re-executes), so there is no
   builder value to pass and nothing to probe. All Prisma calls use the thunk
-  form: full union, retry via re-invocation. The `PrismaPromise` is not
-  re-executable — a settled promise can't be retried.
-- **Drizzle relational query args** — carry `limit` but none of the select
-  probes (`limit` is shared with deletes) → the delete shape (conservative).
+  form: full union, retry via re-invocation.
 - **Drizzle 0.9 builders** — the probes are verified against 1.0+; on ~0.9
   use the thunk form (`tryDb(() => db.select().from(users).execute())`).

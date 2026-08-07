@@ -104,8 +104,9 @@ declare const db: Kysely<DB>;
 
 // builder value: the shape IS the type — constraints are write-only
 const rows = await tryDb(db.selectFrom("users").selectAll());
-//   ^? Result<User[], DbError minus { unique | fk | not-null | check | transaction-aborted }>
-//   deadlock stays (SELECT … FOR UPDATE); data-error stays (read conversions)
+//   ^? Result<User[], DbError minus { unique | fk | not-null | check }>
+//   deadlock stays (SELECT … FOR UPDATE); data-error stays (read conversions);
+//   transaction-aborted stays (a tx-bound select can raise 25P02)
 
 // write builders: every constraint stays in the union
 await tryDb(db.insertInto("users").values({ email }).returningAll());
@@ -129,8 +130,8 @@ Then the fold terminal lists only what's left for the select shape above:
 ```ts
 (unhandled) => {
   // db/deadlock | db/lock-timeout | db/data-error | db/connect-failure |
-  // db/connection-lost | db/authentication-failed | db/authorization-failed |
-  // db/sql-syntax-error | db/query-failure
+  // db/connection-lost | db/transaction-aborted | db/authentication-failed |
+  // db/authorization-failed | db/sql-syntax-error | db/query-failure
   reportError(unhandled);
   return c.json({ error: "internal" }, 500);
 };

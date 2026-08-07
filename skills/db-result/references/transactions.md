@@ -74,11 +74,14 @@ const result = await db.transaction(async (tx) => {
 });
 ```
 
-Per-statement `tryDb` inside a transaction still works via the thunk form
-(`tryDb(() => tx.insert(accounts).values({ … }))`), but statement retry is
+Per-statement `tryDb` inside a transaction still works — the thunk form
+(`tryDb(() => tx.insert(accounts).values({ … }))`) or a tx-bound builder value
+(`tryDb(tx.insert(accounts).values({ … }))`) — and the union honestly keeps
+`db/transaction-aborted`: 25P02 is reachable after any prior failed statement
+in the transaction, so the fold terminal lists it. Statement retry is
 pointless there: a failed statement aborts the transaction, so a retried
-statement fails again with `db/transaction-aborted` (deterministic, no retry).
-Harmless, but not useful — retry the whole transaction instead.
+statement fails again with `db/transaction-aborted` (deterministic, no
+retry). Harmless, but not useful — retry the whole transaction instead.
 
 ## Savepoints
 

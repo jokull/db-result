@@ -807,12 +807,19 @@ export type IsUpdateBuilder<T> = "set" extends keyof T
     ? true
     : false;
 
-/** Delete builders — `where()`, once `values`/`set`/`from` are ruled out by
- * the pipeline order. A DELETE can only FK-fail among the constraints, so
- * `Fk` stays in the union while the other constraints go. `RawBuilder` and
+/** Delete builders — `where()` AND `returning()`, once `values`/`set`/`from`
+ * are ruled out by the pipeline order. `returning` is what separates a real
+ * delete from DDL: Kysely's `CreateIndexBuilder` has a `where` (partial-index
+ * predicate) and `execute` but no `returning`, and `CREATE UNIQUE INDEX`
+ * raises 23505 — a delete claim would exclude it. A DELETE can only FK-fail
+ * among the constraints, so `Fk` stays while the others go. `RawBuilder` and
  * Kysely `MergeQueryBuilder` (which can raise constraints via `thenInsert`)
- * have no `where` → fall to opaque. */
-export type IsDeleteBuilder<T> = "where" extends keyof T ? true : false;
+ * have no `where`/`returning` → fall to opaque. */
+export type IsDeleteBuilder<T> = "where" extends keyof T
+  ? "returning" extends keyof T
+    ? true
+    : false
+  : false;
 
 /** Every shape the lattice can prove. */
 export type DbShape = "read" | "write" | "delete" | "opaque";
@@ -851,15 +858,20 @@ export type ShapeOfQuery<T> =
  * inline. A tag stays in the union unless a shape proves it impossible; the
  * runtime classifier is never affected (narrowing is type-level only).
  * Drivers override entries where their protocol differs.
+ *
+ * `transaction-aborted` is excluded from NO shape: a tx-bound builder (the
+ * tx client returns the same builder types as the root client, so the type
+ * cannot tell) raises 25P02 after any prior failed statement in the
+ * transaction — the exclusion would be a lie in every shape.
  */
 export interface ShapeLedger {
   /** Pure reads cannot raise constraints. Footgun: "reads that write" (DML
    * CTEs, volatile functions, INSTEAD-OF triggers) CAN — the runtime still
    * classifies them correctly, the tag just falls to the fold terminal; use
-   * the thunk form for reads-with-writes. `transaction-aborted` is
-   * impossible without a transaction. */
+   * the thunk form for reads-with-writes. */
   read: DbError;
-  /** Writes can raise every constraint; only transaction-state is excluded. */
+  /** Writes can raise every tag — including `transaction-aborted` when the
+   * builder is bound to a transaction — so nothing is excluded. */
   write: DbError;
   /** A DELETE can only FK-fail among the constraints. */
   delete: DbError;
@@ -867,14 +879,9 @@ export interface ShapeLedger {
 
 /** The ledger every driver starts from. */
 export interface DefaultLedger extends ShapeLedger {
-  read:
-    | UniqueViolation
-    | ForeignKeyViolation
-    | NotNullViolation
-    | CheckViolation
-    | TransactionAborted;
-  write: TransactionAborted;
-  delete: UniqueViolation | NotNullViolation | CheckViolation | TransactionAborted;
+  read: UniqueViolation | ForeignKeyViolation | NotNullViolation | CheckViolation;
+  write: never;
+  delete: UniqueViolation | NotNullViolation | CheckViolation;
 }
 
 /** Tags a shape excludes, per the ledger. `"opaque"` excludes nothing. */

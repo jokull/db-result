@@ -67,7 +67,8 @@ assumes.
   dev warning fires once — wrap in a thunk to get retry).
 - **The builder's own type is the shape signal.** Nothing to declare, nothing
   to sync: the ORM emitted the type, so the evidence is verified by
-  construction — a select drops the constraint tags, a delete keeps only FK.
+  construction — a select drops the constraint tags, a delete keeps only FK;
+  `transaction-aborted` is never excluded (tx-bound builders raise 25P02).
   A builder that proves no shape (raw SQL, Kysely `mergeInto`) is a compile
   error on purpose (fail-loud, never a silent full union); a builder wrapped
   in a thunk is a compile error too (pass it directly). See
