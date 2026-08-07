@@ -131,6 +131,7 @@ type RelationalQueryOf<Q, E extends DbError, L extends ShapeLedger> = {
 /** Relational reads are SELECTs — the read-shape exclusions apply (respecting
  * the driver's ledger). */
 type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
+  E,
   ShapeExclusions<L, "read">
 >;
 
