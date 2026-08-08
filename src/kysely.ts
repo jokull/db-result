@@ -60,9 +60,11 @@ import {
 import type {
   ComparisonOperatorExpression,
   OrderByExpression,
+  OrderByModifiers,
   Compilable,
   DeleteQueryBuilder,
   DeleteResult,
+  InsertObject,
   InsertQueryBuilder,
   InsertResult,
   JoinReferenceExpression,
@@ -100,6 +102,39 @@ type WhereFn<B, S, TB extends keyof S, E extends DbError, L extends ShapeLedger>
   op: ComparisonOperatorExpression,
   rhs: VE,
 ) => WrappedKyselyBuilder<B, E, L>;
+
+/** The wrapped `returning(columns)` result: the raw chain keeps its methods
+ * but the mapped capture of the overloaded `returning` (callback form
+ * last) defers and falls to raw pass-through — losing the E-track. Rebuild
+ * from the CURRENT builder with the execute resolving the exact selected
+ * rows (the same overload-collapse class as ISSUES #3). */
+type ReturningOf<B, TRow, K extends string> = Omit<B, "execute" | "returning"> & {
+  execute(): Promise<{ [P in K]: TRow[P & keyof TRow] }[]>;
+};
+
+/** The wrapped `select(columns)` result: the mapped capture of the
+ * overloaded `select` keeps the single-expression overload and its return
+ * defers — string[]/single-string calls fall to raw pass-through, losing
+ * the E-track. Rebuild the builder's row type from the CALL's selection
+ * (qualified "table.col" or plain column names; the same overload-collapse
+ * class as ISSUES #3). Callback selects keep the mapped behavior (they
+ * already wrap). */
+type SelectRows<S, TB extends keyof S, K extends string> = {
+  [P in K as P extends `${string}.${infer C}` ? C : P]: P extends `${infer T}.${infer C}`
+    ? // qualified refs: the BASE table keeps its own type; other tables are
+      // JOINED — left/right/full joins make them nullable (inner-join
+      // over-null is the documented trade)
+      T extends keyof S
+      ? C extends keyof S[T]
+        ? T extends TB & string
+          ? S[T][C]
+          : S[T][C] | null
+        : unknown
+      : unknown
+    : P extends keyof S[TB]
+      ? S[TB][P]
+      : unknown;
+};
 
 /** The join key form (table, k1, k2) — Kysely overloads joins with the
  * callback form; the mapped type keeps only the latter. */
@@ -198,6 +233,24 @@ type TakeFirstOrThrowFn<B, E extends DbError, L extends ShapeLedger> = <
 type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
   B extends SelectQueryBuilder<infer S, infer TB, infer O>
     ? {
+        // `const` preserves the selection literals (a widened K would map
+        // the rows to an index signature); the single-string form gets its
+        // own overload; callback selects fall through to the mapped type
+        select: (<const K extends string>(
+          selection: readonly K[],
+        ) => WrappedKyselyBuilder<
+          SelectQueryBuilder<S, TB & keyof S, SelectRows<S, TB & keyof S, K>>,
+          E,
+          L
+        >) &
+          (<K extends string>(
+            selection: K,
+          ) => WrappedKyselyBuilder<
+            SelectQueryBuilder<S, TB & keyof S, SelectRows<S, TB & keyof S, K>>,
+            E,
+            L
+          >);
+        distinctOn: <const K extends string>(keys: readonly K[]) => WrappedKyselyBuilder<B, E, L>;
         where: WhereFn<B, S, TB & keyof S, E, L>;
         and: WhereFn<B, S, TB & keyof S, E, L>;
         or: WhereFn<B, S, TB & keyof S, E, L>;
@@ -208,35 +261,58 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
         fullJoin: JoinFn<B, S, TB & keyof S, E, L>;
         orderBy: <OE extends OrderByExpression<S, TB & keyof S, O>>(
           expr: OE,
+          modifiers?: OrderByModifiers,
         ) => WrappedKyselyBuilder<B, E, L>;
         executeTakeFirst: TakeFirstFn<B, E, L>;
         executeTakeFirstOrThrow: TakeFirstOrThrowFn<B, E, L>;
       }
-    : B extends UpdateQueryBuilder<infer S, infer _UT, infer TB, infer _O>
+    : B extends UpdateQueryBuilder<infer S, infer _UT, infer TB, infer O>
       ? {
           where: WhereFn<B, S, TB & keyof S, E, L>;
           and: WhereFn<B, S, TB & keyof S, E, L>;
           or: WhereFn<B, S, TB & keyof S, E, L>;
           orWhere: WhereFn<B, S, TB & keyof S, E, L>;
           set: (update: UpdateObject<S, TB & keyof S>) => WrappedKyselyBuilder<B, E, L>;
+          returning: <K extends keyof S[TB] & string>(
+            selection: K[],
+          ) => WrappedKyselyBuilder<ReturningOf<B, S[TB], K>, E, L>;
           leftJoin: JoinFn<B, S, TB & keyof S, E, L>;
           rightJoin: JoinFn<B, S, TB & keyof S, E, L>;
           innerJoin: JoinFn<B, S, TB & keyof S, E, L>;
           fullJoin: JoinFn<B, S, TB & keyof S, E, L>;
+          orderBy: <OE extends OrderByExpression<S, TB & keyof S, O>>(
+            expr: OE,
+            modifiers?: OrderByModifiers,
+          ) => WrappedKyselyBuilder<B, E, L>;
           executeTakeFirst: TakeFirstFn<B, E, L>;
           executeTakeFirstOrThrow: TakeFirstOrThrowFn<B, E, L>;
         }
-      : B extends DeleteQueryBuilder<infer S, infer TB, infer _O>
+      : B extends DeleteQueryBuilder<infer S, infer TB, infer O>
         ? {
             where: WhereFn<B, S, TB & keyof S, E, L>;
             and: WhereFn<B, S, TB & keyof S, E, L>;
             or: WhereFn<B, S, TB & keyof S, E, L>;
             orWhere: WhereFn<B, S, TB & keyof S, E, L>;
+            returning: <K extends keyof S[TB] & string>(
+              selection: K[],
+            ) => WrappedKyselyBuilder<ReturningOf<B, S[TB], K>, E, L>;
+            orderBy: <OE extends OrderByExpression<S, TB & keyof S, O>>(
+              expr: OE,
+              modifiers?: OrderByModifiers,
+            ) => WrappedKyselyBuilder<B, E, L>;
             executeTakeFirst: TakeFirstFn<B, E, L>;
             executeTakeFirstOrThrow: TakeFirstOrThrowFn<B, E, L>;
           }
-        : B extends InsertQueryBuilder<any, any, infer _O>
+        : B extends InsertQueryBuilder<infer S, infer TB, infer _O>
           ? {
+              // kysely overloads `values` (object | list | factory); the
+              // mapped type keeps only the LAST overload (the factory form)
+              // and the object form dies — re-declare the primary object
+              // form (ISSUES #3, same class)
+              values: (insertObject: InsertObject<S, TB>) => WrappedKyselyBuilder<B, E, L>;
+              returning: <K extends keyof S[TB] & string>(
+                selection: K[],
+              ) => WrappedKyselyBuilder<ReturningOf<B, S[TB], K>, E, L>;
               executeTakeFirst: TakeFirstFn<B, E, L>;
               executeTakeFirstOrThrow: TakeFirstOrThrowFn<B, E, L>;
             }
@@ -268,6 +344,9 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
                   op: ComparisonOperatorExpression,
                   rhs: VE,
                 ) => WrappedKyselyBuilder<B, E, L>;
+                whenMatched: (
+                  cb: (wb: { thenUpdateSet(update: Record<string, unknown>): unknown }) => unknown,
+                ) => WrappedKyselyBuilder<B, E, L>;
                 thenUpdateSet: (update: Record<string, unknown>) => WrappedKyselyBuilder<B, E, L>;
                 thenInsertValues: (
                   insert: Record<string, unknown>,
@@ -279,7 +358,11 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
  * forms restored at every chain level. The mapping instantiates only
  * method-level generics — Kysely's chain methods return the same class
  * parameters, so row types stay precise. */
-export type WrappedKyselyBuilder<B, E extends DbError, L extends ShapeLedger> = {
+export type WrappedKyselyBuilder<
+  B,
+  E extends DbError,
+  L extends ShapeLedger,
+> = KyselyChainOverrides<B, E, L> & {
   [K in keyof B as K extends
     | "execute"
     | "executeTakeFirst"
@@ -293,7 +376,7 @@ export type WrappedKyselyBuilder<B, E extends DbError, L extends ShapeLedger> = 
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {
     execute: (...args: any[]) => Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>>;
-  } & KyselyChainOverrides<B, E, L>;
+  };
 
 /** The wrapped transaction builder: `execute(cb)` resolves to Result;
  * access-mode/isolation setters return the same wrapped shape. */
@@ -345,6 +428,9 @@ export type KyselyTryDb<
   ): WrappedKyselyBuilder<MergeIntoLike<SchemaOf<D>, TR>, E, L>;
   transaction(): WrappedTransaction<D, E, L>;
   executeQuery<T>(compilable: Compilable<T>): Promise<Result<QueryResult<T>, E>>;
+  with: D["with"] extends (alias: infer A, fn: infer F) => infer W
+    ? (alias: A, fn: F) => KyselyTryDb<W & Kysely<any>, E, L>
+    : never;
 } & {
   [K in keyof D as K extends
     | "selectFrom"
@@ -354,6 +440,7 @@ export type KyselyTryDb<
     | "mergeInto"
     | "transaction"
     | "executeQuery"
+    | "with"
     ? never
     : K]: D[K];
 };
@@ -448,6 +535,11 @@ const wrapKysely = (db: unknown, config: TryDbConfig<DbError> | undefined): unkn
       ) {
         return (...args: unknown[]) =>
           wrapBuilder(value.apply(target, args), wrapExecute, takeFirstTerminals);
+      }
+      if (key === "with") {
+        // `with` returns a NEW Kysely db (the CTE registered) — wrap it
+        // recursively so CTE chains keep the E-track
+        return (...args: unknown[]) => wrapKysely(value.apply(target, args), config);
       }
       return value;
     },

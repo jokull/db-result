@@ -159,3 +159,44 @@ describe("kyselyTryDb — E-tracked takeFirst terminals", () => {
     expect(first.isOk()).toBe(true);
   });
 });
+
+describe("kyselyTryDb — with-CTE chains stay E-tracked (ISSUES #3 class)", () => {
+  const wrapped = (db: unknown) => kyselyTryDb(db as never) as any;
+
+  test("the with() result is re-wrapped: CTE chains execute to Result", async () => {
+    const db = {
+      // `with` returns a NEW db — the wrapper must re-wrap it recursively
+      with: () => ({
+        selectFrom: () => ({
+          execute: async () => [{ id: 1 }],
+          toOperationNode: () => ({}) as never,
+        }),
+      }),
+    };
+    const result = await wrapped(db)
+      .with("cte", (qb: unknown) => qb)
+      .selectFrom("cte")
+      .execute();
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value).toEqual([{ id: 1 }]);
+  });
+
+  test("CTE chain errors classify through the re-wrapped db", async () => {
+    const db = {
+      with: () => ({
+        selectFrom: () => ({
+          execute: async () => {
+            throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+          },
+          toOperationNode: () => ({}) as never,
+        }),
+      }),
+    };
+    const result = await wrapped(db)
+      .with("cte", (qb: unknown) => qb)
+      .selectFrom("cte")
+      .execute();
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error._tag).toBe("db/deadlock");
+  });
+});

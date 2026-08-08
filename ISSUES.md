@@ -476,3 +476,32 @@ the spread; `retrySafe` is re-marked. The blog's `onInternalError` peel
 can now surface the driver message one level deep. Tests: the ISSUES #2
 repro (SQLITE_BUSY → lock-timeout carries "database is locked"), the
 constraint rebuild, and retrySafe-survives-rebuild.
+
+## 17. ISSUES #3 — wrapped kysely builders reject orderBy(expr, modifiers) — FIXED + the overload-collapse class
+
+The mapped capture of kysely's overloaded chain methods keeps only each
+method's LAST overload, so the canonical forms collapsed: `orderBy(expr,
+modifiers)` (the issue), `values(object)` (the factory form won), `returning
+(columns)` and `select(columns)` (deferred → raw pass-through, E-track lost),
+`distinctOn([...])` (the single-ref form won), and the CTE `with` (returned a
+raw db — chains ran unwrapped).
+
+Fixes in kysely.ts:
+- `orderBy(expr, modifiers?: OrderByModifiers)` on select/update/delete
+  branches (the issue's suggested fix).
+- `values(insertObject: InsertObject<S, TB>)` on the insert branch.
+- `returning(columns)` rebuilt with exact rows on insert/update/delete
+  (via `ReturningOf`).
+- `select(columns)` re-declared with `const` type params + `SelectRows`
+  (qualified refs: base table keeps its type, joined tables nullable).
+- `distinctOn(keys)`; the merge `whenMatched(cb)` form.
+- `with` re-wrapped recursively (runtime trap + type), so CTE chains keep
+  the E-track.
+- The chain overrides moved FIRST in the `WrappedKyselyBuilder` intersection
+  (the mapped fall-through was winning for the overloads both accepted).
+
+Harness: `kysely-shapes.probe.ts` (repo root, excluded from gates) — the
+trip census translated to kysely@0.29.4, Same-precision vs raw controls.
+Documented residuals: callback selects (fn.countAll aggregates) and raw
+`sql\`...\`.execute(db)` keep their E-track at RUNTIME only — their types
+are kysely's own (the mapped capture defers / the raw builder's signature).
