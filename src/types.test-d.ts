@@ -46,6 +46,7 @@ import type {
   UpdateQueryBuilder,
   DeleteQueryBuilder,
   MergeQueryBuilder,
+  MergeResult,
   RawBuilder,
   NoResultError,
   QueryNode,
@@ -464,6 +465,19 @@ type _m5 = Assert<
 >;
 const mUpdFull = mw.update(mUsers).set({ name: "x" }).output({ inserted: true });
 type _m6 = Assert<Member<Fk, ErrOfPromise<typeof mUpdFull>> extends true ? true : false>;
+// codex P1: mssql (rc.4) exposes the relational surface as `_query` (not
+// `query`) — it must E-track the same way (reads exclude the constraint
+// tags).
+declare const mdbQ: MsSqlDatabase<any, any, { mUsers: typeof mUsers }>;
+const mwQ = drizzleTryDb(mdbQ);
+const mq = mwQ._query.mUsers.findMany();
+type _mq0 = Assert<Absent<Unique, ErrOfPromise<typeof mq>> extends true ? true : false>;
+type _mq1 = Assert<Member<Data, ErrOfPromise<typeof mq>> extends true ? true : false>;
+// and the with-surface selectDistinctOn keeps its 1-arg form (codex P2):
+const wsdWith = ww.selectDistinctOn([users.id]).from(users);
+type _ww5 = Assert<
+  Absent<Unique, ErrOf<ReturnType<typeof wsdWith.execute>>> extends true ? true : false
+>;
 
 // ─── kyselyTryDb — the E-tracked wrapper ────────────────────────────────────
 
@@ -637,6 +651,21 @@ const ktfoDelShaped = kDelShaped.executeTakeFirstOrThrow();
 type _kt26 = Assert<
   Member<NoResultError, ErrOfPromise<typeof ktfoDelShaped>> extends true ? true : false
 >;
+// codex P2: mergeInto accepts ALIASED targets and seeds MergeResult (not
+// unknown — no spurious undefined/NoResultError); the using join-key form
+// typechecks.
+const km = kw.mergeInto("users as u");
+// the seeded Ok is the merge result family (Kysely's own execute types it
+// `SimplifyResult<MergeResult>[]` — a deferred conditional, so one-way
+// extends is the decisive probe, not `Same`):
+type _km0 = Assert<OkOfPromise<ReturnType<typeof km.execute>> extends MergeResult[] ? true : false>;
+type _km1 = Assert<
+  Absent<undefined, OkOf<ReturnType<typeof km.executeTakeFirst>>> extends true ? true : false
+>;
+const kmUsing = km.using("users", "users.id", "users.id");
+type _km2 = Assert<
+  Same<ErrOfPromise<ReturnType<typeof kmUsing.execute>>, DbError> extends true ? true : false
+>;
 
 // ─── relational queries — the read-shape E-track (sqlite db, blog pattern) ─
 
@@ -701,6 +730,21 @@ const _sInsCol = wrappedSqlite.insert(rPosts).values({ slug: rPosts.slug });
 const sUpdCol = wrappedSqlite.update(rPosts).set({ title: rPosts.title }).where(undefined);
 type _relExpr3 = Assert<
   Member<Unique, ErrOf<ReturnType<typeof sUpdCol.execute>>> extends true ? true : false
+>;
+// codex P2: the conflict handler's set re-types from the threaded table —
+// bogus conflict-set columns are rejected like raw drizzle (the rejection
+// error below is the proof).
+const _sConflictBad = wrappedSqlite
+  .insert(rPosts)
+  .values({ slug: "a", title: "b" })
+  // @ts-expect-error — bogus conflict-set column rejected
+  .onConflictDoUpdate({ target: rPosts.slug, set: { bogus: 1 } });
+const sConflictOk = wrappedSqlite
+  .insert(rPosts)
+  .values({ slug: "a", title: "b" })
+  .onConflictDoUpdate({ target: rPosts.slug, set: { title: "c" } });
+type _relExpr4 = Assert<
+  Member<Unique, ErrOf<ReturnType<typeof sConflictOk.execute>>> extends true ? true : false
 >;
 // ISSUES.md #1: wrapped chains must keep drizzle's precise rows through
 // zero-arg `.returning()` — not the degraded Record<string, unknown>[].

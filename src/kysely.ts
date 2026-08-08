@@ -72,6 +72,7 @@ import type {
   QueryResult,
   ReferenceExpression,
   SelectQueryBuilder,
+  SimpleTableReference,
   TableExpression,
   UpdateObject,
   UpdateQueryBuilder,
@@ -243,6 +244,34 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
             ? {
                 executeTakeFirst: TakeFirstFn<B, E, L>;
                 executeTakeFirstOrThrow: TakeFirstOrThrowFn<B, E, L>;
+                // the merge stages are overloaded; the mapped type keeps
+                // only each method's LAST overload, dropping the documented
+                // forms — `using`'s join-key form, `whenMatchedAnd`'s
+                // operator form, the object forms of thenUpdateSet /
+                // thenInsertValues — re-added as self-returning members (the
+                // merge builder is opaque — no shape narrowing — so the
+                // wrapped type is unchanged; codex P2)
+                using: <
+                  TE extends TableExpression<any, any>,
+                  K1 extends JoinReferenceExpression<any, any, TE>,
+                  K2 extends JoinReferenceExpression<any, any, TE>,
+                >(
+                  sourceTable: TE,
+                  k1: K1,
+                  k2: K2,
+                ) => WrappedKyselyBuilder<B, E, L>;
+                whenMatchedAnd: <
+                  RE extends ReferenceExpression<any, any>,
+                  VE extends OperandValueExpressionOrList<any, any, RE>,
+                >(
+                  lhs: RE,
+                  op: ComparisonOperatorExpression,
+                  rhs: VE,
+                ) => WrappedKyselyBuilder<B, E, L>;
+                thenUpdateSet: (update: Record<string, unknown>) => WrappedKyselyBuilder<B, E, L>;
+                thenInsertValues: (
+                  insert: Record<string, unknown>,
+                ) => WrappedKyselyBuilder<B, E, L>;
               }
             : {};
 
@@ -278,6 +307,18 @@ export type WrappedTransaction<D, E extends DbError, L extends ShapeLedger> = {
   ): WrappedTransaction<D, E, L>;
 };
 
+/** Kysely's `MergeInto` helper (internal to the parser) — reconstructed so
+ * the wrapped `mergeInto` accepts ALIASED targets
+ * (`mergeInto("person as p")`) and seeds `MergeResult` like the raw client
+ * (codex P2). */
+type MergeIntoLike<DB, TE extends SimpleTableReference<DB>> = [TE] extends [keyof DB]
+  ? MergeQueryBuilder<DB, TE, MergeResult>
+  : [TE] extends [`${infer T} as ${infer A}`]
+    ? T extends keyof DB
+      ? MergeQueryBuilder<DB & Record<A, DB[T]>, A, MergeResult>
+      : never
+    : never;
+
 /** The E-tracked Kysely db surface. Builder factories return
  * `WrappedKyselyBuilder`s (union narrowing per builder shape, precise rows);
  * `transaction().execute(cb)` and raw `executeQuery` resolve to `Result`.
@@ -299,9 +340,9 @@ export type KyselyTryDb<
   deleteFrom<TB extends keyof SchemaOf<D>>(
     table: TB,
   ): WrappedKyselyBuilder<DeleteQueryBuilder<SchemaOf<D>, TB, DeleteResult>, E, L>;
-  mergeInto<TB extends keyof SchemaOf<D>>(
-    table: TB,
-  ): WrappedKyselyBuilder<MergeQueryBuilder<SchemaOf<D>, TB, unknown>, E, L>;
+  mergeInto<TR extends SimpleTableReference<SchemaOf<D>>>(
+    table: TR,
+  ): WrappedKyselyBuilder<MergeIntoLike<SchemaOf<D>, TR>, E, L>;
   transaction(): WrappedTransaction<D, E, L>;
   executeQuery<T>(compilable: Compilable<T>): Promise<Result<QueryResult<T>, E>>;
 } & {

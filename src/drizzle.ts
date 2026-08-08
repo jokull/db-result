@@ -234,11 +234,21 @@ export type DrizzleTryDb<
                 // zero-arg call errored; `| []` restores it (same sharp
                 // edge as the top-level select: rows degrade structurally)
                 (...args: WA | []) => WrappedBuilder<WB, E, L>
-              : (...args: WA) => WrappedBuilder<WB, E, L>
+              : K extends "selectDistinctOn"
+                ? // pg's with-surface selectDistinctOn is overloaded
+                  // (1-arg on | 2-arg on+fields) — restore the optional
+                  // fields form like the top-level factory (codex P2)
+                  W[K] extends (on: infer On, fields?: infer F) => infer WB2
+                  ? (on: On, fields?: F) => WrappedBuilder<WB2, E, L>
+                  : never
+                : (...args: WA) => WrappedBuilder<WB, E, L>
           : W[K];
       }
     : never;
   query: RelationalQueryOf<QuerySurfaceOf<D>, E, L>;
+  // mssql (rc.4) exposes the relational surface as `_query` — same E-track
+  // (codex P1); other drivers don't have it, so it's `never` for them.
+  _query: D extends { _query: infer Q } ? RelationalQueryOf<Q, E, L> : never;
 } & {
   [K in keyof D as K extends
     | "select"
@@ -251,6 +261,7 @@ export type DrizzleTryDb<
     | "execute"
     | "with"
     | "query"
+    | "_query"
     ? never
     : K]: D[K];
 };
@@ -330,7 +341,7 @@ const wrapDrizzle = (db: unknown, config: TryDbConfig<DbError> | undefined): unk
   return new Proxy(db as object, {
     get(target, key) {
       const value = Reflect.get(target, key);
-      if (key === "query") {
+      if (key === "query" || key === "_query") {
         return wrapRelational(value, wrapExecute);
       }
       if (typeof value !== "function") return value;

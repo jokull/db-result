@@ -186,35 +186,50 @@ export type WrappedBuilder<
             ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
               (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable> &
                 SqliteTerminalsOf<B, E, L>)
-          : K extends "values"
-            ? TTable extends { $inferInsert: infer I }
-              ? // re-type from the threaded table — the mapped `infer V`
-                // instantiates drizzle's values param at its constraint, which
-                // accepts invalid columns; per-column values keep the
-                // expression form (`SQL` / `Placeholder`) drizzle allows.
-                // When the pre-values builder already carries the projected
-                // rows in its `_` slot (mssql `output`), the values result
-                // keeps them — drizzle's own chain loses them (the raw
-                // values result's slot has `output: undefined`)
-                (
-                  value: InsertValueOf<I> | InsertValueOf<I>[],
-                ) => B extends { _: { result: infer Rows } }
-                  ? WrappedBuilder<R, E, L, TTable> &
-                      SqliteTerminalsOf<R, E, L> & { _: { result: Rows } }
-                  : WrappedBuilder<R, E, L, TTable>
-              : A extends [infer V]
-                ? V extends readonly unknown[]
-                  ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+          : K extends "onConflictDoUpdate"
+            ? // the conflict handler's config is generic over the builder's
+              // table — the mapped capture instantiates it at the
+              // constraint, so the `set` object accepts invalid columns.
+              // Re-type the set from the threaded table's insert model
+              // (the target/where keep the raw types; codex P2).
+              TTable extends { $inferInsert: infer I }
+              ? B[K] extends (config: infer C) => any
+                ? C extends { set: unknown }
+                  ? (
+                      config: Omit<C, "set"> & { set: Partial<SetValueOf<I>> },
+                    ) => WrappedBuilder<R, E, L, TTable>
                   : (...args: A) => WrappedBuilder<R, E, L, TTable>
                 : (...args: A) => WrappedBuilder<R, E, L, TTable>
-            : K extends "set"
-              ? TTable extends { $inferInsert: infer I }
-                ? // same re-typing for the update set — the constraint
-                  // instantiation accepts invalid update objects; per-column
-                  // expressions AND column references stay allowed
-                  (update: Partial<SetValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
-                : (...args: A) => WrappedBuilder<R, E, L, TTable>
               : (...args: A) => WrappedBuilder<R, E, L, TTable>
+            : K extends "values"
+              ? TTable extends { $inferInsert: infer I }
+                ? // re-type from the threaded table — the mapped `infer V`
+                  // instantiates drizzle's values param at its constraint, which
+                  // accepts invalid columns; per-column values keep the
+                  // expression form (`SQL` / `Placeholder`) drizzle allows.
+                  // When the pre-values builder already carries the projected
+                  // rows in its `_` slot (mssql `output`), the values result
+                  // keeps them — drizzle's own chain loses them (the raw
+                  // values result's slot has `output: undefined`)
+                  (
+                    value: InsertValueOf<I> | InsertValueOf<I>[],
+                  ) => B extends { _: { result: infer Rows } }
+                    ? WrappedBuilder<R, E, L, TTable> &
+                        SqliteTerminalsOf<R, E, L> & { _: { result: Rows } }
+                    : WrappedBuilder<R, E, L, TTable>
+                : A extends [infer V]
+                  ? V extends readonly unknown[]
+                    ? (value: V | V[number]) => WrappedBuilder<R, E, L, TTable>
+                    : (...args: A) => WrappedBuilder<R, E, L, TTable>
+                  : (...args: A) => WrappedBuilder<R, E, L, TTable>
+              : K extends "set"
+                ? TTable extends { $inferInsert: infer I }
+                  ? // same re-typing for the update set — the constraint
+                    // instantiation accepts invalid update objects; per-column
+                    // expressions AND column references stay allowed
+                    (update: Partial<SetValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
+                  : (...args: A) => WrappedBuilder<R, E, L, TTable>
+                : (...args: A) => WrappedBuilder<R, E, L, TTable>
         : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {
