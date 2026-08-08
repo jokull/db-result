@@ -459,3 +459,20 @@ RQBv2 relational (dominant — 259+ files, 456 relations), CTE chains,
 All gates green incl. the strict published-types consumer + blog tsc.
 `trip-shapes.probe.ts` stays as the hardening harness (its `Same` probes
 are the regression net).
+
+## 16. ISSUES #2 — classified errors are self-describing — FIXED
+
+The classify path constructed tags bare (`new QueryFailure({})`) and the
+original driver failure was attached by a hand-rolled non-enumerable
+`cause` property — `error.message` was empty and logs/`String(error)`/
+structured loggers showed nothing without walking hidden properties.
+
+`withCause` (retry.ts) now REBUILDS the classified error through the tag
+constructor with `{ ...props, message, cause }` — better-result forwards
+`message`/`cause` to the standard `Error` machinery (cause non-enumerable
+per the spec, stack appended with "Caused by:"), and `toJSON` serializes
+both. Classification props (`constraint`, `potentiallyTransient`) survive
+the spread; `retrySafe` is re-marked. The blog's `onInternalError` peel
+can now surface the driver message one level deep. Tests: the ISSUES #2
+repro (SQLITE_BUSY → lock-timeout carries "database is locked"), the
+constraint rebuild, and retrySafe-survives-rebuild.

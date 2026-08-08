@@ -1,6 +1,7 @@
 import { Result } from "better-result";
 import {
   type DbError,
+  mark,
   isConnectionFailure,
   QueryFailure,
   DeadlockError,
@@ -40,19 +41,41 @@ type RetryConfig<E> = {
 
 // ─── tryDb ───────────────────────────────────────────────────────────────────
 
-/** Attaches the original failure as a non-enumerable cause for observability. */
+/**
+ * Carries the original driver failure on the classified error: the real
+ * `message` and the standard enumerable `Error.cause`. The tag constructors
+ * forward `message`/`cause` to `Error` and spread the props, so the rebuild
+ * preserves the classification props (`constraint`, `potentiallyTransient`)
+ * while making `error.message`, `String(error)`, `toJSON`, and structured
+ * loggers self-describing — no hidden-property walking (ISSUES #2).
+ * `retrySafe` is re-marked (non-enumerable by design).
+ */
 const withCause = (error: DbError, cause: unknown): DbError => {
+  const retrySafe = (error as DbError & { retrySafe?: boolean }).retrySafe;
+  const message =
+    cause instanceof Error ? cause.message : typeof cause === "string" ? cause : String(cause);
   try {
-    Object.defineProperty(error, "cause", {
-      value: cause,
-      enumerable: false,
-      writable: true,
-      configurable: true,
+    const rebuilt = new (error.constructor as new (args: Record<string, unknown>) => DbError)({
+      ...(error as unknown as Record<string, unknown>),
+      message,
+      cause,
     });
+    if (retrySafe !== undefined) mark(rebuilt, retrySafe);
+    return rebuilt;
   } catch {
-    // cause is diagnostic only; never fail the classification over it.
+    // classification must never fail — fall back to the hidden cause
+    try {
+      Object.defineProperty(error, "cause", {
+        value: cause,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+    } catch {
+      // cause is diagnostic only
+    }
+    return error;
   }
-  return error;
 };
 
 /** Internal: may this classified error be auto-retried by the default policy? */ const isRetrySafe =

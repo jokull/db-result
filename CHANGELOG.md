@@ -68,6 +68,17 @@ Dogfooded against a real D1 + drizzle 1.0.0-rc.4 codebase (the blog), which surf
 - **Docs**: README vocabulary matches the shipped 14 tags (connect-failure/connection-lost split, data-error, deadlock, lock-timeout, transaction-aborted); the `matchErrorPartial` example uses the real 3-arg form with annotated handlers; stale lattice doc references removed.
 - **Test organization**: suites colocated with their modules (`src/*.test.ts`, `src/classify/*.test.ts`), compile-only type matrix at `src/types.test-d.ts`, live integration at `src/integration.test.ts` — `bun test` runs with zero config.
 
+## [0.2.1] — 2026-08-08
+
+### Fixed
+
+- **Classified errors are self-describing** (ISSUES #2): the original driver
+  failure now lands on the classified error as the real `message` plus the
+  standard `Error.cause` (constructed through the tag classes — `String(error)`,
+  logs, and `toJSON` show the driver text; the blog's incident peel no longer
+  needs to walk hidden properties). Classification props survive; `retrySafe`
+  is preserved so the transient retry policy is unchanged.
+
 ## [0.1.0] — 2026-08-06
 
 First public release. Database failures as better-result tagged errors — `Result<T, DbError>`, retry-safe, driver-agnostic.

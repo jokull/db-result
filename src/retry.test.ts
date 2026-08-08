@@ -291,3 +291,58 @@ describe("tryTx — whole-transaction retry", () => {
     }
   });
 });
+
+describe("classified errors are self-describing (ISSUES #2)", () => {
+  test("message carries the driver text and cause is the standard enumerable Error.cause", async () => {
+    const driverError = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    const result = await tryDb(
+      () => {
+        throw driverError;
+      },
+      { retryTransient: false },
+    );
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      const e = result.error;
+      // the real driver message — String(error) and logs are self-describing
+      expect(e.message).toBe("database is locked");
+      expect(String(e)).toContain("database is locked");
+      // standard Error.cause machinery (non-enumerable per the Error spec —
+      // the hand-rolled hidden property is gone); toJSON serializes it
+      expect(e.cause).toBe(driverError);
+      expect(JSON.parse(JSON.stringify(e)).cause.message).toBe("database is locked");
+      expect(JSON.parse(JSON.stringify(e)).message).toBe("database is locked");
+    }
+  });
+
+  test("classification props survive the rebuild (constraint, transient, retrySafe)", async () => {
+    const result = await tryDb(
+      () => {
+        throw Object.assign(new Error("UNIQUE constraint failed: users.email"), {
+          code: "SQLITE_CONSTRAINT_UNIQUE",
+        });
+      },
+      { retryTransient: false },
+    );
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      const e = result.error;
+      expect(e.message).toBe("UNIQUE constraint failed: users.email");
+      expect(e._tag).toBe("db/unique-violation");
+      expect((e as { constraint?: string }).constraint).toBeDefined();
+    }
+  });
+
+  test("retrySafe survives the rebuild — transient errors still retry", async () => {
+    let attempts = 0;
+    const result = await tryDb(() => {
+      attempts += 1;
+      if (attempts < 3)
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      return "connected";
+    });
+    expect(result.isOk()).toBe(true);
+    expect(attempts).toBe(3);
+    if (result.isOk()) expect(result.value).toBe("connected");
+  });
+});
