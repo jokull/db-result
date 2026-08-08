@@ -2,7 +2,10 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
-## [0.1.1] — 2026-08-07
+## [0.2.0] — 2026-08-07
+
+Breaking (0.x minor): the per-tag guard migration (below) removes the
+`isXxx` predicate functions.
 
 Dogfooded against a real D1 + drizzle 1.0.0-rc.4 codebase (the blog), which surfaced and fixed the wrapper's gaps.
 
@@ -23,7 +26,45 @@ Dogfooded against a real D1 + drizzle 1.0.0-rc.4 codebase (the blog), which surf
 
 ### Fixed
 
-- **Codex review findings**: wrapped builders no longer execute on property inspection (`.then`/`.catch` reads are lazy — merely checking thenability never runs the query); terminal dispatch uses own-property checks so `.constructor`/`.hasOwnProperty` pass through; the custom-`errorConstructor` union is honest (`Result<T, E | YourError>`, never a claimed `NoResultError`).
+- **Sync-backend transaction atomicity** (release blocker, codex P1): the
+  wrapped `transaction` mirrors the source db's async-ness — sync backends
+  (bun:sqlite, better-sqlite3) force a synchronous callback with drizzle's
+  branded-rejection mechanic, and a runtime guard throws when a sync driver
+  returns a promise callback by identity (it had committed before the
+  wrapped statements resolved).
+- **SQLite/D1 terminals E-tracked** — `run`/`all`/`get` on wrapped chains
+  resolve `Result` (a duplicate-key `.run()` is an `Err`, retried) instead
+  of throwing raw, including through `with(...)` CTE chains; `all`/`get`
+  are gated on `.returning()` for mutation builders like drizzle.
+- **Codex review findings**: the runtime proxy now wraps pre-execute builder
+  shapes (`with().insert(t)`, mssql `output()`), so the E-track survives
+  intermediate chain steps; family guards read `_tag` again (serialized /
+  cross-realm tagged errors match the boundary); the minimum-TS consumer
+  uses `UniqueViolation.is(e)`; a column is no longer accepted as an insert
+  value (it bound as a scalar → NULL); the kysely `takeFirst` family detects
+  selects by builder brand, not row shape; `$call` arrays / URLSearchParams
+  / FormData are no longer mistaken for builders; mssql's `_query`
+  relational surface is E-tracked like `query`.
+- **Wrapped builders no longer execute on property inspection** — `.then` /
+  `.catch` reads are lazy (merely checking thenability never runs the
+  query); terminal dispatch uses own-property checks so
+  `.constructor`/`.hasOwnProperty` pass through; the custom-`errorConstructor`
+  union is honest (`Result<T, E | YourError>`, never a claimed
+  `NoResultError`).
+- **Write chains re-typed from the threaded table**: `values` accepts
+  `SQL`/`Placeholder` expressions, `set` also accepts column references,
+  `onConflictDoUpdate`'s `set` rejects unknown columns — bogus keys never
+  typecheck, expression-valued writes do.
+- **`selectDistinctOn` keeps its 1-arg form** (top-level and `with`
+  surface); the `with` factories thread the table generic and restore
+  zero-arg `select`/`selectDistinct`.
+- **MSSQL `output` chains resolve the projected rows** — the fields arm
+  rebuilds the result from the call's fields type (including the
+  `{ inserted: true }` full-row form), propagated through `values`.
+- **Kysely `mergeInto` completed** — aliased targets (`mergeInto("users as u")`),
+  `MergeResult` seeding (no spurious `undefined`/`NoResultError`), and the
+  overloaded merge stages (`using` join keys, `whenMatchedAnd`, the `then*`
+  object forms).
 - **Docs**: README vocabulary matches the shipped 14 tags (connect-failure/connection-lost split, data-error, deadlock, lock-timeout, transaction-aborted); the `matchErrorPartial` example uses the real 3-arg form with annotated handlers; stale lattice doc references removed.
 - **Test organization**: suites colocated with their modules (`src/*.test.ts`, `src/classify/*.test.ts`), compile-only type matrix at `src/types.test-d.ts`, live integration at `src/integration.test.ts` — `bun test` runs with zero config.
 
