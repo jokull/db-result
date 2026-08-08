@@ -400,3 +400,30 @@ Fifth-pass review surfaced:
   rows defer (the codex's environment; the repo's probes use the structural
   `MsSqlDatabase<any>` and are exact). No mssql driver installed to
   reproduce; the insert/delete output chains are exact either way.
+
+## 14. Sixth + seventh-pass codex findings (P1s fixed, P2s fixed or documented)
+
+Sixth pass: **P1 FIXED** — the sqlite `run`/`all`/`get` terminals didn't
+reach CTE chains (the `with` factories wrapped without the terminals; a
+duplicate-key `with(...).insert(...).run()` threw). The with factories now
+wrap the known builder keys unconditionally with the terminals; runtime
+test with a real bun-sqlite CTE. **P2 FIXED** — `SqliteTerminalsOf` moved to
+the WrappedBuilder top level (per-chain-level), `all`/`get` gated on
+`.returning()` for mutation builders (drizzle rejects them without it), the
+`set`-only builder match now requires a marker (URLSearchParams/FormData
+excluded — iterator `values` + `set` lookalikes), and kysely `mergeInto`
+was routed through the wrapper.
+
+Seventh pass: **P1 FIXED** — mssql (rc.4) exposes the relational surface as
+`_query` (not `query`) — wrapped + E-tracked identically (runtime + type +
+probe). **P2 FIXED** — `onConflictDoUpdate`'s `set` re-types from the
+threaded table (bogus conflict columns rejected, probe both ways); the with
+surface's `selectDistinctOn` keeps its 1-arg form; kysely merge completed —
+`mergeInto` accepts ALIASED targets (`mergeInto("users as u")`) via the
+reconstructed `MergeInto` helper (also seeds `MergeResult` — no spurious
+`undefined`/`NoResultError`), and the overloaded merge stages (`using` join
+keys, `whenMatchedAnd` operator form, `thenUpdateSet`/`thenInsertValues`
+object forms) are re-added. **P2 documented** — the merge stages' precise
+types are kysely-internal (not root-exported); the re-added forms are
+self-returning `WrappedKyselyBuilder`s (the merge builder is opaque — no
+shape narrowing — so the wrapped type is unchanged).
