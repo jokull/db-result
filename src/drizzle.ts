@@ -44,12 +44,24 @@ import {
   type ShapeLedger,
   type TryDbConfig,
 } from "./db-result.js";
-import { isBuilder, wrapBuilder, type BuilderTerminals, type WrappedBuilder } from "./wrap.js";
+import {
+  isBuilder,
+  wrapBuilder,
+  type BuilderTerminals,
+  type SelectSelection,
+  type WrappedBuilder,
+} from "./wrap.js";
 import type { Result } from "better-result";
 // Type-only imports from drizzle's driver-agnostic root modules (relations /
 // utils — not the pg/sqlite/mysql driver subpaths), used to re-express the
 // relational methods with per-call precision. Erased at build time.
-import type { BuildQueryResult, DBQueryConfig } from "drizzle-orm/relations";
+import type {
+  BuildQueryResult,
+  DBQueryConfig,
+  DBQueryConfigWithComment,
+  TableRelationalConfig,
+  TablesRelationalConfig,
+} from "drizzle-orm/relations";
 import type { KnownKeysOnly } from "drizzle-orm/utils";
 
 // ─── Type-level: the E-tracked surface ──────────────────────────────────────
@@ -142,30 +154,51 @@ type RelationalReadE<E extends DbError, L extends ShapeLedger> = Exclude<
  * result from the CALL's config (`BuildQueryResult<TSchema, TFields,
  * TConfig>`), so the mapped capture — which instantiates the generic at its
  * constraint — would claim the FULL row for `columns`/`with` projections.
- * Instead: the method's type parameter cannot be inferred from the
- * constraint position (`infer C` comes back `unknown`), but the params'
- * `KnownKeysOnly<TConfig, C>` captures the EXACT constraint with its type
- * arguments concrete — extract TSchema/TFields and the many/one mode from
- * it, re-declare the generic, and recompute `BuildQueryResult` per call.
- * Non-matching methods (duck surfaces, `$dynamic`) resolve to `never` and
- * fall back to the mapped arms below. */
+ * The generic's constraint cannot be inferred bare under the native
+ * compiler (`infer C` comes back `unknown`), and inferring through
+ * `KnownKeysOnly<TConfig, C>` binds the UNBOUND `TConfig` — both paths dead.
+ * The method's PARAM type is `KnownKeysOnly<TConfig, C0>` where C0 is the
+ * CONCRETE class-bound constraint — extract the SECOND arg and match it
+ * against the exact `DBQueryConfigWithComment` pattern (the bare
+ * `DBQueryConfig` pattern fails against the `& { comment }` intersection;
+ * G2). The mode comes from C0 ('many'/'one'), and the re-declared generic
+ * recomputes `BuildQueryResult` per call. Non-matching methods (duck
+ * surfaces, `$dynamic`) resolve to `never` and fall back to the mapped arms
+ * below. */
 type RelationalMethod<R, E extends DbError, L extends ShapeLedger> =
-  R extends <_TConfig extends infer _C>(config?: infer A) => PromiseLike<infer _R>
-    ? A extends KnownKeysOnly<infer C, any>
-      ? C extends DBQueryConfig<infer Mode, infer TSchema, infer TFields>
-        ? <TConfig extends C>(
-            config?: KnownKeysOnly<TConfig, C>,
-          ) => Promise<
-            Result<
-              Mode extends "one"
-                ? BuildQueryResult<TSchema, TFields, TConfig> | undefined
-                : BuildQueryResult<TSchema, TFields, TConfig>[],
-              RelationalReadE<E, L>
-            >
-          >
-        : never
+  R extends <_TConfig extends any>(config?: infer A) => PromiseLike<infer _R>
+    ? A extends KnownKeysOnly<any, infer C0>
+      ? // sqlite/mysql constrain with the bare `DBQueryConfig`, pg/mssql add
+        // `& { comment? }` (DBQueryConfigWithComment) — accept both
+        C0 extends DBQueryConfigWithComment<infer Mode, infer TSchema, infer TFields>
+        ? RebuiltRelational<Mode, TSchema, TFields, C0, E, L>
+        : C0 extends DBQueryConfig<infer Mode, infer TSchema, infer TFields>
+          ? RebuiltRelational<Mode, TSchema, TFields, C0, E, L>
+          : never
       : never
     : never;
+
+/** The per-call relational method: the config keeps the RAW constraint's
+ * shape (`KnownKeysOnly<TConfig, C0>`), the result is recomputed from the
+ * CALL's TConfig via drizzle's own `BuildQueryResult` — `with`/`columns`
+ * projections resolve exactly (G2). */
+type RebuiltRelational<
+  Mode,
+  TSchema extends TablesRelationalConfig,
+  TFields extends TableRelationalConfig,
+  C0,
+  E extends DbError,
+  L extends ShapeLedger,
+> = <TConfig extends C0 & Record<string, unknown>>(
+  config?: KnownKeysOnly<TConfig, C0>,
+) => Promise<
+  Result<
+    Mode extends "one"
+      ? BuildQueryResult<TSchema, TFields, TConfig> | undefined
+      : BuildQueryResult<TSchema, TFields, TConfig>[],
+    RelationalReadE<E, L>
+  >
+>;
 
 type WrapRelational<R, E extends DbError, L extends ShapeLedger> = {
   [K in keyof R]: RelationalMethod<R[K], E, L> extends never
@@ -186,19 +219,33 @@ export type DrizzleTryDb<
   E extends DbError = DbError,
   L extends ShapeLedger = DefaultLedger,
 > = {
-  select: (...args: Parameters<D["select"]> | []) => WrappedBuilder<ReturnType<D["select"]>, E, L>;
-  selectDistinct: (
-    ...args: Parameters<D["selectDistinct"]> | []
-  ) => WrappedBuilder<ReturnType<D["selectDistinct"]>, E, L>;
+  select: D["select"] extends { (): infer B0 }
+    ? // G1: re-declare the overloads so the call's selection lands in a
+      // synthesized `_` slot (the raw pre-from builder carries none); the
+      // chain's `from` arm then rebuilds precise rows. The mapped
+      // `ReturnType<D["select"]>` kept only the last (fields) overload with
+      // its generic unbound — every call form inherited the degraded rows.
+      (() => WrappedBuilder<SelectSelection<B0, undefined>, E, L>) &
+        (<TSelection extends Record<string, unknown>>(
+          fields: TSelection,
+        ) => WrappedBuilder<SelectSelection<B0, TSelection>, E, L>)
+    : never;
+  selectDistinct: D["selectDistinct"] extends { (): infer B0 }
+    ? (() => WrappedBuilder<SelectSelection<B0, undefined>, E, L>) &
+        (<TSelection extends Record<string, unknown>>(
+          fields: TSelection,
+        ) => WrappedBuilder<SelectSelection<B0, TSelection>, E, L>)
+    : never;
   selectDistinctOn: D["selectDistinctOn"] extends (on: infer On, fields?: infer F) => infer B
     ? // pg overloads `selectDistinctOn` (1-arg select-all | 2-arg fields);
       // the mapped `infer A` capture keeps only the LAST overload, so the
       // valid 1-arg form errored "Expected 2 arguments". `fields` optional
-      // restores both call forms; the wrapped chain degrades the projection
-      // rows to structural arrays either way (documented sharp edge), so the
-      // two overloads share the captured builder — narrowing (read shape) is
-      // what must survive (codex #10). No zero-arg form.
-      (on: On, fields?: F) => WrappedBuilder<B, E, L>
+      // restores both call forms (codex #10). The selection lands in the
+      // synthesized slot (G1) — select-all when `fields` is omitted.
+      (
+        on: On,
+        fields?: F,
+      ) => WrappedBuilder<SelectSelection<B, F extends undefined ? undefined : F>, E, L>
     : never;
   insert: <TTable extends { $inferSelect: unknown }>(
     table: TTable,
@@ -231,15 +278,26 @@ export type DrizzleTryDb<
             : K extends "select" | "selectDistinct"
               ? // both are overloaded (zero-arg select-all | fields) — the
                 // mapped capture keeps only the fields form, so the valid
-                // zero-arg call errored; `| []` restores it (same sharp
-                // edge as the top-level select: rows degrade structurally)
-                (...args: WA | []) => WrappedBuilder<WB, E, L>
+                // zero-arg call errored; re-declare both and land the call's
+                // selection in the synthesized slot (G1)
+                (() => WrappedBuilder<SelectSelection<WB, undefined>, E, L>) &
+                  (<TSelection extends Record<string, unknown>>(
+                    fields: TSelection,
+                  ) => WrappedBuilder<SelectSelection<WB, TSelection>, E, L>)
               : K extends "selectDistinctOn"
                 ? // pg's with-surface selectDistinctOn is overloaded
                   // (1-arg on | 2-arg on+fields) — restore the optional
-                  // fields form like the top-level factory (codex P2)
+                  // fields form like the top-level factory (codex P2); the
+                  // selection lands in the synthesized slot (G1)
                   W[K] extends (on: infer On, fields?: infer F) => infer WB2
-                  ? (on: On, fields?: F) => WrappedBuilder<WB2, E, L>
+                  ? (
+                      on: On,
+                      fields?: F,
+                    ) => WrappedBuilder<
+                      SelectSelection<WB2, F extends undefined ? undefined : F>,
+                      E,
+                      L
+                    >
                   : never
                 : (...args: WA) => WrappedBuilder<WB, E, L>
           : W[K];

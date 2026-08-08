@@ -427,3 +427,35 @@ object forms) are re-added. **P2 documented** — the merge stages' precise
 types are kysely-internal (not root-exported); the re-added forms are
 self-returning `WrappedKyselyBuilder`s (the merge builder is opaque — no
 shape narrowing — so the wrapped type is unchanged).
+
+## 15. Trip-shape hardening (G1/G2/G3) — FIXED, PLAN.md
+
+The trip census (5 scouts, 849 drizzle files) pinned the real shapes: pg
+RQBv2 relational (dominant — 259+ files, 456 relations), CTE chains,
+`for('update')`/raw locks, `excluded.*` upserts, D1 batch. The probe
+(`trip-shapes.probe.ts`) found three row-inference breaks:
+
+- **G1 (P1, every select)**: wrapped select chains resolved rows as
+  `{} | {[x:string]:any}` unions — `ReturnType<D["select"]>` kept the
+  unbound fields overload and every chain link's `infer R` re-instantiated
+  drizzle's generics at their constraints. FIXED: factories synthesize the
+  `_` slot with the call's selection; `from`/joins rebuild the rows
+  structurally (`FieldDataOf`, join nullability by column `tableName`);
+  row-neutral links keep the current builder. Raw-parity asserted with
+  `Same` (incl. left-join nullability).
+- **G2 (P1, relational — the dominant shape)**: `with`-nested fields were
+  dropped — the precision path never fired under the native compiler
+  (constraint inference gives `unknown`; the `KnownKeysOnly` indirection
+  binds the unbound TConfig; sqlite's bare `DBQueryConfig` matched by
+  accident). FIXED: extract the CONCRETE class-bound constraint from the
+  param's second `KnownKeysOnly` arg, match `DBQueryConfigWithComment`
+  (pg/mssql) or `DBQueryConfig` (sqlite/mysql), recompute
+  `BuildQueryResult` per call. Depth-3 nested `with` + findFirst
+  `| undefined` asserted exact.
+- **G3 (P2, CAS writes)**: `returning({fields})` rows were `{}` — the
+  fields arm now reuses the mssql `output` reconstruction (`OutputAll`).
+  ISSUES #6 (fields-`returning` follow-up) CLOSED.
+
+All gates green incl. the strict published-types consumer + blog tsc.
+`trip-shapes.probe.ts` stays as the hardening harness (its `Same` probes
+are the regression net).

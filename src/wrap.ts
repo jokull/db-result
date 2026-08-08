@@ -81,19 +81,27 @@ export type SetValueOf<I> = { [K in keyof I]: I[K] | DrizzleExpr };
  * is the table's select model), so the `output`/`returning` arms rebuild
  * the result from the CALL's fields type instead of drizzle's per-call
  * inference (which degrades through the mapped type under the native
- * compiler; codex #12). */
-type FieldDataOf<F, TTable> = F extends true
+ * compiler; codex #12). `TJoinName`/`TNullable` carry the JOIN nullability
+ * (G1): a left/right/full-joined table's columns are nullable regardless of
+ * their own `notNull`, by matching the column's `tableName` slot. */
+type FieldDataOf<F, TTable, TJoinName = never, TNullable extends boolean = false> = F extends true
   ? TTable extends { $inferSelect: infer S }
     ? S
     : unknown
-  : F extends { _: { data: infer D; notNull: infer N } }
+  : F extends { _: { data: infer D; notNull: infer N; tableName: infer TN } }
     ? N extends true
-      ? D
+      ? TJoinName extends never
+        ? D
+        : TN extends TJoinName
+          ? TNullable extends true
+            ? D | null
+            : D
+          : D
       : D | null
     : F extends { _: { type: infer T } }
       ? T
       : F extends Record<string, any>
-        ? { [K in keyof F]: FieldDataOf<F[K], TTable> }
+        ? { [K in keyof F]: FieldDataOf<F[K], TTable, TJoinName, TNullable> }
         : unknown;
 
 /** The row shape a fields-projection produces: one data type per field. */
@@ -140,6 +148,86 @@ type OutputAll<B, TTable, TFields> =
       }
     : B;
 
+/** The rows a select's `from(table)` link produces — rebuilt structurally
+ * instead of trusting the mapped `infer R` (the from method's TConfig
+ * generic instantiates at its constraint, degrading the row type; G1).
+ * The METHODS come from the raw `from` result (the pre-from builder is only
+ * a factory — it has no `where`/`orderBy`/joins); the `_` slot is rebuilt
+ * with precise rows so downstream `this`-based links still resolve. */
+type FromOf<B, TFrom> = B extends { _: infer Slot; from: (...args: any[]) => any }
+  ? Slot extends { selection: infer Sel }
+    ? B["from"] extends (source: any, ...rest: any[]) => infer R
+      ? R extends { _: infer RS }
+        ? Omit<R, "_"> & {
+            _: Omit<RS, "table" | "selection" | "result"> & {
+              table: TFrom;
+              selection: Sel;
+              result: Sel extends undefined
+                ? TFrom extends { $inferSelect: infer S }
+                  ? S[]
+                  : unknown[]
+                : { [K in keyof Sel]: FieldDataOf<Sel[K], TFrom> }[];
+            };
+          }
+        : B
+      : B
+    : B
+  : B;
+
+/** The pre-from select builder after the factory call — drizzle's
+ * `PgSelectBuilder` carries NO `_` slot (its selection lives in a private
+ * field), so the mapped `from` arm has nothing to rebuild from. Synthesize
+ * the slot with the CALL's selection (G1); the `from` arm then produces the
+ * rows. `result: never[]` marks the pre-from state — a select is not
+ * executable before `.from()` (drizzle's own restriction). */
+export type SelectSelection<B0, TSelection> = Omit<B0, "_"> & {
+  _: {
+    selection: TSelection;
+    table: undefined;
+    result: never[];
+  };
+};
+
+/** The rows a join link produces: the current builder's rows extended with
+ * the joined table's columns — nullable for left/right/full joins, inner
+ * keeps the columns' own nullability (G1). For partial selects the joined
+ * columns already sit in the selection; `FieldDataOf` applies the join
+ * nullability by matching the column's `tableName` against the joined
+ * table's name. Methods come from the raw join result (constraint-
+ * instantiated but methodful). */
+type JoinOf<B, TJoined, K extends "leftJoin" | "rightJoin" | "innerJoin" | "fullJoin"> = B extends {
+  _: infer Slot;
+} & { [P in K]: (table: any, on: any) => any }
+  ? Slot extends { selection: infer Sel; table: infer TBase }
+    ? B[K] extends (table: any, on: any) => infer R
+      ? R extends { _: infer RS }
+        ? Omit<R, "_"> & {
+            _: Omit<RS, "result"> & {
+              result: Sel extends undefined
+                ? TBase extends { $inferSelect: infer S }
+                  ? TJoined extends { $inferSelect: infer JS }
+                    ? K extends "innerJoin"
+                      ? (S & { [K2 in keyof JS]: JS[K2] })[]
+                      : (S & { [K2 in keyof JS]: JS[K2] | null })[]
+                    : S[]
+                  : unknown[]
+                : TJoined extends { _: { name: infer JN } }
+                  ? {
+                      [K2 in keyof Sel]: FieldDataOf<
+                        Sel[K2],
+                        TBase,
+                        JN,
+                        K extends "innerJoin" ? false : true
+                      >;
+                    }[]
+                  : { [K2 in keyof Sel]: FieldDataOf<Sel[K2], TBase> }[];
+            };
+          }
+        : B
+      : B
+    : B
+  : B;
+
 /** A builder whose `execute`/`then`/`catch`/`finally` resolve to
  * `Result<T, E>` and whose chain methods keep returning E-tracked builders.
  * The union narrows per builder shape via the ledger — exactly like
@@ -180,10 +268,13 @@ export type WrappedBuilder<
             // `this` unresolved, so `ExecR` falls through to the execute
             // branch. The zero-arg arm therefore reconstructs from the
             // CURRENT builder `B` (concrete): all columns from B's table via
-            // `ReturningAll`. The fields arm keeps the wrapped-but-degraded
-            // inference (drizzle's per-call fields projection can't be
-            // reconstructed structurally — tracked as a follow-up).
-            ((fields: any) => WrappedBuilder<R, E, L, TTable>) &
+            // `ReturningAll`. The fields arm rebuilds the rows from the
+            // CALL's fields type via `OutputAll` (the same per-call
+            // reconstruction as the mssql `output` arm — the mapped `R`
+            // degraded the rows to `{}`/`{[x:string]: unknown}`; G3).
+            (<TFields extends Record<string, unknown>>(
+              fields: TFields,
+            ) => WrappedBuilder<OutputAll<B, TTable, TFields>, E, L, TTable>) &
               (() => WrappedBuilder<ReturningAll<B, TTable>, E, L, TTable> &
                 SqliteTerminalsOf<B, E, L>)
           : K extends "onConflictDoUpdate"
@@ -229,7 +320,47 @@ export type WrappedBuilder<
                     // expressions AND column references stay allowed
                     (update: Partial<SetValueOf<I>>) => WrappedBuilder<R, E, L, TTable>
                   : (...args: A) => WrappedBuilder<R, E, L, TTable>
-                : (...args: A) => WrappedBuilder<R, E, L, TTable>
+                : K extends "from"
+                  ? // G1: the select chain's `from` — the mapped `infer R`
+                    // instantiates drizzle's TConfig generic at its
+                    // constraint, degrading the row type. Re-declare the
+                    // generic and rebuild the `_` slot rows structurally.
+                    <TFrom extends object>(
+                      source: TFrom,
+                    ) => WrappedBuilder<
+                      FromOf<B, TFrom>,
+                      E,
+                      L,
+                      TFrom extends { $inferSelect: infer _ } ? TFrom : never
+                    >
+                  : K extends "leftJoin" | "rightJoin" | "innerJoin" | "fullJoin"
+                    ? // same story for the join links — the joined table's
+                      // generic instantiates at its constraint. The rows
+                      // extend the CURRENT rows with the joined columns
+                      // (nullable for left/right/full).
+                      <TJoined extends object>(
+                        table: TJoined,
+                        on: any,
+                      ) => WrappedBuilder<JoinOf<B, TJoined, K>, E, L, TTable>
+                    : K extends
+                          | "where"
+                          | "orderBy"
+                          | "limit"
+                          | "offset"
+                          | "groupBy"
+                          | "having"
+                          | "for"
+                          | "$dynamic"
+                          | "distinct"
+                          | "distinctOn"
+                      ? // G1: these links don't change the projection, but
+                        // their `this`-based returns reference the RAW
+                        // builder's slot — re-instantiating the generics
+                        // and re-degrading the rows. Return the CURRENT
+                        // builder so the slot rebuilt at `from`/joins
+                        // survives to the terminal.
+                        (...args: any[]) => WrappedBuilder<B, E, L, TTable>
+                      : (...args: A) => WrappedBuilder<R, E, L, TTable>
         : B[K]
     : B[K];
 } & Promise<Result<ExecR<B>, ShapeUnion<E, L, B>>> & {
