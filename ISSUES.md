@@ -487,6 +487,7 @@ modifiers)` (the issue), `values(object)` (the factory form won), `returning
 raw db — chains ran unwrapped).
 
 Fixes in kysely.ts:
+
 - `orderBy(expr, modifiers?: OrderByModifiers)` on select/update/delete
   branches (the issue's suggested fix).
 - `values(insertObject: InsertObject<S, TB>)` on the insert branch.
@@ -505,3 +506,21 @@ trip census translated to kysely@0.29.4, Same-precision vs raw controls.
 Documented residuals: callback selects (fn.countAll aggregates) and raw
 `sql\`...\`.execute(db)` keep their E-track at RUNTIME only — their types
 are kysely's own (the mapped capture defers / the raw builder's signature).
+
+## 18. ISSUES #4 — generic chain methods return unwrapped builders — FIXED
+
+The mapped capture of kysely's generic chain methods defers through the
+generic signature — `select` (any form) and `groupBy` returned raw
+builders, killing the E-track mid-chain. The select string forms were
+already fixed by the #3 pass; the remaining break was the CALLBACK form:
+`select(({ fn }) => fn.countAll<number>().as("count"))` resolved through
+the mapped fall-through (rows correct, no Result).
+
+Fixed: the select arm's callback overload re-declares the generic with a
+typed `ExpressionBuilder` constraint and resolves the rows via kysely's
+own `CallbackSelection` (array returns) or `Selection` (single-return
+form) — `CallbackRowsOf`. groupBy was fixed by the #3 select arm (its
+result is now concrete, so the mapped capture wraps). The probe's
+callback-select ticket is removed and the issue's exact repro lines are
+added with Same-precision assertions (incl. the `{ count: number }`
+single-return row and executeTakeFirst).

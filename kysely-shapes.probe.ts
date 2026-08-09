@@ -150,12 +150,10 @@ const w7 = await wdb
   .insertInto("line_items")
   .values({ id: "x", bookingId: "b", sku: "s", qty: 1, unitPrice: "0" })
   .onConflict((oc) =>
-    oc
-      .column("id")
-      .doUpdateSet({
-        qty: (eb) => eb.ref("excluded.qty"),
-        unitPrice: (eb) => eb.ref("excluded.unitPrice"),
-      }),
+    oc.column("id").doUpdateSet({
+      qty: (eb) => eb.ref("excluded.qty"),
+      unitPrice: (eb) => eb.ref("excluded.unitPrice"),
+    }),
   )
   .returningAll();
 const w7Qty: number | null = w7.isOk() ? (w7.value[0]?.qty ?? null) : null;
@@ -223,11 +221,10 @@ const w13 = await wdb
   .leftJoin("line_items", "line_items.bookingId", "bookings.id")
   .groupBy("bookings.userId")
   .execute();
-// TICKET (documented): callback selects (fn.countAll etc.) fall to the raw
-// fall-through — rows are correct, but the E-track is runtime-only for
-// them (the mapped capture of the overloaded select defers for callbacks).
-// @ts-expect-error -- callback select: E-track not visible in the type
+// FIXED (ISSUES #4): the callback select keeps the E-track — kysely's own
+// CallbackSelection/Selection rows.
 const w13N: number | null = w13.isOk() ? (w13.value[0]?.n ?? null) : null;
+const w13Sku: string[] | null = w13.isOk() ? (w13.value[0]?.skus ?? null) : null;
 
 // W14: distinct / distinctOn
 const w14 = await wdb.selectFrom("bookings").select("userId").distinct().execute();
@@ -328,3 +325,25 @@ type _k3 = Assert<Same<OkOf<typeof w3>, typeof c3> extends true ? true : false>;
 type _k4 = Assert<Same<OkOf<typeof w4>, typeof c4> extends true ? true : false>;
 type _k5 = Assert<Same<OkOf<typeof w5>, typeof c5> extends true ? true : false>;
 type _k6 = Assert<Same<OkOf<typeof w6>, typeof c6> extends true ? true : false>;
+
+/* ------------------------------------------------------------------ */
+/* ISSUES #4 — generic chain methods keep the E-track (the issue's      */
+/* exact repro shapes)                                                 */
+/* ------------------------------------------------------------------ */
+
+const i4a = await wdb.selectFrom("users").select("email").execute();
+const i4aOk: string | null = i4a.isOk() ? (i4a.value[0]?.email ?? null) : null;
+const i4b = await wdb.selectFrom("users").select(["id", "email"]).execute();
+const i4bOk: string | null = i4b.isOk() ? (i4b.value[0]?.email ?? null) : null;
+const i4c = await wdb
+  .selectFrom("users")
+  .select(({ fn }) => fn.countAll<number>().as("count"))
+  .executeTakeFirst();
+const i4cOk: number | null = i4c.isOk() ? (i4c.value?.count ?? null) : null;
+const i4d = await wdb.selectFrom("users").select(["email"]).groupBy("email").execute();
+const i4dOk: string | null = i4d.isOk() ? (i4d.value[0]?.email ?? null) : null;
+
+type _i4a = Assert<Same<OkOf<typeof i4a>, { email: string }[]> extends true ? true : false>;
+type _i4c = Assert<
+  Same<OkOf<typeof i4c>, { count: number } | undefined> extends true ? true : false
+>;

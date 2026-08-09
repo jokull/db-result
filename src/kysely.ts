@@ -73,6 +73,9 @@ import type {
   OperandValueExpressionOrList,
   QueryResult,
   ReferenceExpression,
+  CallbackSelection,
+  ExpressionBuilder,
+  Selection,
   SelectQueryBuilder,
   SimpleTableReference,
   TableExpression,
@@ -119,6 +122,16 @@ type ReturningOf<B, TRow, K extends string> = Omit<B, "execute" | "returning"> &
  * (qualified "table.col" or plain column names; the same overload-collapse
  * class as ISSUES #3). Callback selects keep the mapped behavior (they
  * already wrap). */
+/** The callback-select rows: kysely's own `Selection`/`CallbackSelection`
+ * handle both the array return (the common form) and the single-return
+ * form (the mapped capture defers through the generic callback signature,
+ * killing the E-track mid-chain; ISSUES #4). */
+type CallbackRowsOf<S, TB extends keyof S, C> = C extends (eb: any) => infer Ret
+  ? Ret extends readonly unknown[]
+    ? CallbackSelection<S, TB, C>
+    : Selection<S, TB, Ret>
+  : {};
+
 type SelectRows<S, TB extends keyof S, K extends string> = {
   [P in K as P extends `${string}.${infer C}` ? C : P]: P extends `${infer T}.${infer C}`
     ? // qualified refs: the BASE table keeps its own type; other tables are
@@ -235,7 +248,9 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
     ? {
         // `const` preserves the selection literals (a widened K would map
         // the rows to an index signature); the single-string form gets its
-        // own overload; callback selects fall through to the mapped type
+        // own overload; the callback form resolves kysely's own
+        // `CallbackSelection` rows (the mapped capture defers through the
+        // generic signature — the E-track died mid-chain; ISSUES #4)
         select: (<const K extends string>(
           selection: readonly K[],
         ) => WrappedKyselyBuilder<
@@ -247,6 +262,13 @@ type KyselyChainOverrides<B, E extends DbError, L extends ShapeLedger> =
             selection: K,
           ) => WrappedKyselyBuilder<
             SelectQueryBuilder<S, TB & keyof S, SelectRows<S, TB & keyof S, K>>,
+            E,
+            L
+          >) &
+          (<C extends (eb: ExpressionBuilder<S, TB & keyof S>) => any>(
+            cb: C,
+          ) => WrappedKyselyBuilder<
+            SelectQueryBuilder<S, TB & keyof S, CallbackRowsOf<S, TB & keyof S, C>>,
             E,
             L
           >);
