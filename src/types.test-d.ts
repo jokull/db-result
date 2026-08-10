@@ -16,9 +16,8 @@
  * and thunks / settled promises keep the full driver union.
  *
  * Imports are the real published ORM types — Kysely 0.29 builders, Drizzle
- * 1.0.0-rc.4 builders as produced by the real `drizzle()` factory, and the
- * generated Prisma 6.19.3 client — so a probe that drifts from an ORM's
- * actual surface fails this file.
+ * 1.0.0-rc.4 builders as produced by the real `drizzle()` factory — so a
+ * probe that drifts from an ORM's actual surface fails this file.
  *
  * Assertion pattern: every check is `Assert<…>` — a conditional constrained
  * to `true`, so a failing row is a compile error. Helpers return plain
@@ -800,37 +799,5 @@ const relFirstProj = wrappedSqlite.query.rPosts.findFirst({ columns: { slug: tru
 type _relFirst0 = Assert<
   Same<OkOfPromise<typeof relFirstProj>, { slug: string } | undefined> extends true ? true : false
 >;
-
-// ─── prismaTryDb — the E-tracked wrapper ────────────────────────────────────
-import { prismaTryDb } from "./prisma.ts";
-import { PrismaClient } from "@prisma/client";
-
-// Type-only: never executed, so no DATABASE_URL is needed at construction.
-const pclient = new PrismaClient();
-const pw = prismaTryDb(pclient);
-
-// delegate calls: full union (Prisma never narrows), correct value types.
-const pfind = pw.user.findMany({ where: { email: "a" } });
-type _pq1 = Assert<Same<ErrOf<typeof pfind>, DbError> extends true ? true : false>;
-type _pq2 = Assert<Member<Unique, ErrOf<typeof pfind>> extends true ? true : false>;
-type PFindVal = Awaited<typeof pfind> extends Result<infer V, unknown> ? V : never;
-type _pq3 = Assert<PFindVal extends { id: number; email: string }[] ? true : false>;
-const pcreate = pw.user.create({ data: { email: "a" } });
-type _pq4 = Assert<Member<Unique, ErrOf<typeof pcreate>> extends true ? true : false>;
-
-// interactive transaction: whole-tx Result, inner statements E-tracked.
-const ptx = pw.$transaction(async (tx) => {
-  const r = await tx.user.create({ data: { email: "b" } });
-  type _pq5 = Assert<Member<Unique, ErrOfResult<typeof r>> extends true ? true : false>;
-  if (r.isErr()) return r;
-  return r.value;
-});
-type _pq6 = Assert<Same<ErrOf<typeof ptx>, DbError> extends true ? true : false>;
-
-// batch transaction + raw queries: full union.
-const pbatch = pw.$transaction([pcreate]);
-type _pq7 = Assert<Same<ErrOf<typeof pbatch>, DbError> extends true ? true : false>;
-const praw = pw.$queryRaw`SELECT 1`;
-type _pq8 = Assert<Same<ErrOf<typeof praw>, DbError> extends true ? true : false>;
 
 export {};

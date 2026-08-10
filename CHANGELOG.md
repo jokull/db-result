@@ -2,6 +2,29 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
+## [0.3.0] — 2026-08-07
+
+Breaking (0.x minor): `prismaTryDb` and the `db-result/prisma` entry point are
+removed — no bandwidth to keep a live Prisma integration suite honest.
+
+### Removed
+
+- **`prismaTryDb` / `db-result/prisma`** — the wrapper, its export entry, the
+  optional `@prisma/client` peer dependency, the `prisma` + `@prisma/client`
+  dev dependencies, the `db:generate` script, and the schema fixture. Migrate:
+  `prismaTryDb(client)` calls become thunks — `tryDb(() => prisma.user.findMany(args))`
+  (full union, retry by re-invocation); interactive `$transaction` becomes
+  `tryTx(() => prisma.$transaction(async (tx) => { … }))`.
+- The `prisma` keyword from package metadata.
+
+### Unchanged
+
+- **Prisma P-code classification stays.** The classifier's P-code protocol
+  branch (`P2002` → unique, `P2034` → deadlock, `P2028` → transaction-aborted,
+  …) is pure string classification over fabricated fixtures — unit-tested, no
+  live client required — and `tryDb`/`tryTx` still classify Prisma errors
+  exactly. Prisma apps use the thunk form on the driver entry point.
+
 ## [0.2.0] — 2026-08-07
 
 Breaking (0.x minor): the per-tag guard migration (below) removes the

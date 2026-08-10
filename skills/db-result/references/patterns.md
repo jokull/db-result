@@ -9,7 +9,7 @@ wrapper cause-chains (Drizzle, Effect-shaped nesting) to the driver error.
 // raw pg / postgres.js / mysql2 / mssql / sqlite — same shape
 const [user] = await tryDb(() => sql`select * from users where id = ${id}`);
 
-// drizzle / kysely / prisma — API untouched, outcome wrapped
+// drizzle / kysely — API untouched, outcome wrapped (prisma: thunk form)
 const created = await tryDb(() => db.insert(users).values({ email }).returning());
 if (created.isErr() && UniqueViolation.is(created.error)) {
   return errors.EmailTaken({ email, constraint: created.error.constraint });

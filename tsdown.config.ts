@@ -10,7 +10,6 @@ export default defineConfig({
     "src/drivers/mssql.ts",
     "src/drizzle.ts",
     "src/kysely.ts",
-    "src/prisma.ts",
   ],
   format: ["esm"],
   dts: {

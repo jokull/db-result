@@ -20,9 +20,7 @@ import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { drizzleTryDb } from "./drizzle.ts";
 import { kyselyTryDb } from "./kysely.ts";
-import { prismaTryDb } from "./prisma.ts";
 import { Kysely, PostgresDialect } from "kysely";
-import { PrismaClient } from "@prisma/client";
 
 const wrapUsers = pgTable("wrap_users", {
   id: integer("id").primaryKey(),
@@ -513,52 +511,6 @@ describePg("kyselyTryDb — the E-tracked wrapper", () => {
       void fake;
     } finally {
       await pool.end().catch(() => {});
-    }
-  });
-});
-
-// ─── prismaTryDb — the E-tracked wrapper ─────────────────────────────────────
-
-describePg("prismaTryDb — the E-tracked wrapper", () => {
-  test("delegate calls and $transaction resolve to Result against real pg", async () => {
-    const pool = new pg.Pool({ connectionString: process.env.PGTEST_DSN });
-    const client = await pool.connect();
-    try {
-      await client.query('DROP TABLE IF EXISTS "User" CASCADE');
-      await client.query(`
-        CREATE TABLE "User" (
-          id SERIAL PRIMARY KEY,
-          email TEXT NOT NULL UNIQUE,
-          age INTEGER,
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
-        )`);
-      const prisma = new PrismaClient({ datasourceUrl: process.env.PGTEST_DSN });
-      const db = prismaTryDb(prisma);
-
-      const created = await db.user.create({ data: { email: "p@a.b" } });
-      expect(created.isOk()).toBe(true);
-      const dupe = await db.user.create({ data: { email: "p@a.b" } });
-      expect(dupe.isErr()).toBe(true);
-      if (dupe.isErr()) expect(dupe.error._tag).toBe("db/unique-violation");
-
-      const found = await db.user.findMany({ where: { email: "p@a.b" } });
-      expect(found.isOk()).toBe(true);
-      if (found.isOk()) expect(found.value.length).toBe(1);
-
-      const tx = await db.$transaction(async (tx) => {
-        const r = await tx.user.create({ data: { email: "q@c.d" } });
-        if (r.isErr()) return r;
-        return r.value;
-      });
-      expect(tx.isOk()).toBe(true);
-
-      const raw = await db.$queryRaw`SELECT 1 AS n`;
-      expect(raw.isOk()).toBe(true);
-
-      await prisma.$disconnect();
-    } finally {
-      await client.release();
-      await pool.end();
     }
   });
 });

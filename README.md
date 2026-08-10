@@ -184,8 +184,7 @@ footgun. Full lattice, footguns, and per-driver ledgers:
 
 If you want the whole codebase on Result shapes — no `tryDb` at every call site,
 no thunks — wrap the ORM client once. One wrapper per ORM, each on the shared
-core: `drizzleTryDb` (`db-result/drizzle`), `kyselyTryDb` (`db-result/kysely`),
-`prismaTryDb` (`db-result/prisma`).
+core: `drizzleTryDb` (`db-result/drizzle`), `kyselyTryDb` (`db-result/kysely`).
 
 ```ts
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -222,10 +221,10 @@ are no thunks at the call site. Per ORM:
   `executeTakeFirstOrThrow` resolves `Result<T, E | NoResultError>` — Kysely's
   only throw becomes a value, custom `errorConstructor` honored. Shape
   narrowing applies to both.
-- **prisma** — delegate calls, `$transaction` (interactive and batch), and raw
-  `$queryRaw` resolve to Result with a **full union** (Prisma has no builder
-  types to probe — nothing is narrowed, honestly); wrap the client after
-  `$extends`.
+- **prisma** — no wrapper: every delegate call is one-shot (a `PrismaPromise`
+  memoizes after its first `then`, so it can never re-execute). Use the thunk
+  form — `tryDb(() => prisma.user.findMany(args))` — full union, retry by
+  re-invocation; Prisma P-codes still classify exactly.
 
 Tighten the union per protocol with the explicit generic on any wrapper:
 `drizzleTryDb<typeof db, SqliteDbError>(db)`.
