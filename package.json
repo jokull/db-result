@@ -92,7 +92,7 @@
     "check:typescript-minimum": "bun run build && bun x --yes --package typescript@5.4.5 tsc -p tsconfig.typescript-minimum.json"
   },
   "dependencies": {
-    "better-result": "^3.0.0"
+    "better-result": "^3.0.1"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
