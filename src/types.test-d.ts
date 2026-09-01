@@ -800,4 +800,48 @@ type _relFirst0 = Assert<
   Same<OkOfPromise<typeof relFirstProj>, { slug: string } | undefined> extends true ? true : false
 >;
 
+// ISSUES #5 (codex G2): the relational generic previously intersected the
+// re-declared constraint with `Record<string, unknown>` (`TConfig extends C0 &
+// Record<string, unknown>`), which leaked an `[x: string]: never` index
+// signature into the `KnownKeysOnly` parameter and rejected valid configs whose
+// `where` used drizzle's built-in `RAW` predicate ("Type '{ RAW: … }' is not
+// assignable to type 'never'"). Fix: keep the parameter in drizzle's exact
+// form (`KnownKeysOnly<TConfig, C0>` with `TConfig extends C0`) and apply the
+// `Record<string, unknown>` intersection only when re-computing
+// `BuildQueryResult`. This is the pg / `DBQueryConfigWithComment` variant.
+const relUsersT = pgTable("rel_users", { id: text("id").primaryKey() });
+const relPostsT = pgTable("rel_posts", {
+  id: integer("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => relUsersT.id),
+  title: text("title").notNull(),
+});
+const relPgRelations = defineRelations({ users: relUsersT, posts: relPostsT }, (r) => ({
+  users: { posts: r.many.posts() },
+  posts: { user: r.one.users({ from: r.posts.userId, to: r.users.id }) },
+}));
+const relPgDb = drizzle({ relations: relPgRelations, connection: { connectionString: "x" } });
+const wrappedPg = drizzleTryDb(relPgDb);
+
+// the reported rejection — now compiles (parity with raw drizzle):
+const relRaw = wrappedPg.query.users.findFirst({
+  where: { RAW: (user) => drizzleSql`${user.id} LIKE ${"a%"}` },
+  columns: { id: true },
+  with: { posts: { columns: { title: true } } },
+});
+type _relRaw0 = Assert<
+  Same<
+    OkOfPromise<typeof relRaw>,
+    { id: string; posts: { title: string }[] } | undefined
+  > extends true
+    ? true
+    : false
+>;
+// reads keep the constraint tags out of the error union.
+type _relRaw1 = Assert<Absent<Unique, ErrOfPromise<typeof relRaw>> extends true ? true : false>;
+type _relRaw2 = Assert<Member<Data, ErrOfPromise<typeof relRaw>> extends true ? true : false>;
+// a plain-column where still works alongside the RAW form:
+wrappedPg.query.users.findFirst({ where: { id: "abc" }, columns: { id: true } });
+
 export {};

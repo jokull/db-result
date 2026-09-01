@@ -2,6 +2,20 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+
+- **`drizzleTryDb` accepts RQBv2 relational `where: { RAW }` predicates.** The
+  re-declared relational generic intersected its `TConfig` constraint with
+  `Record<string, unknown>`, which leaked an `[x: string]: never` index
+  signature into the `KnownKeysOnly` parameter and rejected valid configs whose
+  `where` used `RAW` (`TS2345: Type '{ RAW: … }' is not assignable to type
+  'never'`). The intersection now stays off the parameter (Drizzle's exact
+  `TConfig extends C0` + `KnownKeysOnly<TConfig, C0>` form) and is applied only
+  where `BuildQueryResult` needs it, so per-call `columns` / `with` projection
+  precision is unchanged (ISSUES #5).
+
 ## [0.3.0] — 2026-08-07
 
 Breaking (0.x minor): `prismaTryDb` and the `db-result/prisma` entry point are

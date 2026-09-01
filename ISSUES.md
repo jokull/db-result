@@ -524,3 +524,26 @@ result is now concrete, so the mapped capture wraps). The probe's
 callback-select ticket is removed and the issue's exact repro lines are
 added with Same-precision assertions (incl. the `{ count: number }`
 single-return row and executeTakeFirst).
+
+## 19. ISSUES #5 — relational `where: { RAW }` rejected — FIXED
+
+The relational re-declared generic (`RebuiltRelational`) intersected the
+re-declared constraint with `Record<string, unknown>`:
+`<TConfig extends C0 & Record<string, unknown>>(config?: KnownKeysOnly<TConfig, C0>)`.
+Because `C0`'s constraint carries an index signature, the homomorphic
+`KnownKeysOnly` mapped the index key to `never` (`string` is not a key of
+`C0`), so the parameter type carried an `[x: string]: never` index
+signature — TypeScript then rejected every property against it, so a valid
+config whose `where` used drizzle's built-in `RAW` predicate failed with
+`Type '{ RAW: … }' is not assignable to type 'never'`. The identical raw
+drizzle query type-checked; this was a wrapper type-surface gap.
+
+Fixed: drop the intersection from the `TConfig` constraint (the parameter
+is now drizzle's own exact form, `TConfig extends C0` +
+`KnownKeysOnly<TConfig, C0>`) and apply `Record<string, unknown>` only at
+the `BuildQueryResult` call, which is what actually needs the
+`true | Record<string, unknown>` full-selection constraint. The fix does
+not change which keys `BuildQueryResult` reads, so per-call `columns` /
+`with` precision is unchanged. Covered by a pg /
+`DBQueryConfigWithComment` parity test in `types.test-d.ts` (findFirst +
+`where: { RAW }`, exact projected row, read-shape error union).

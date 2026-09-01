@@ -178,10 +178,16 @@ type RelationalMethod<R, E extends DbError, L extends ShapeLedger> =
       : never
     : never;
 
-/** The per-call relational method: the config keeps the RAW constraint's
- * shape (`KnownKeysOnly<TConfig, C0>`), the result is recomputed from the
- * CALL's TConfig via drizzle's own `BuildQueryResult` — `with`/`columns`
- * projections resolve exactly (G2). */
+/** The per-call relational method: the config keeps drizzle's own constraint
+ * shape (`TConfig extends C0`, parameter `KnownKeysOnly<TConfig, C0>` — matches
+ * the ORM's `findMany`/`findFirst` signatures exactly), and the result is
+ * recomputed from the CALL's TConfig via drizzle's own `BuildQueryResult`, so
+ * `with`/`columns` projections resolve per call (G2). The `Record<string,
+ * unknown>` intersection required by `BuildQueryResult`'s full-selection
+ * constraint stays OFF the parameter — putting it on the `TConfig` constraint
+ * leaked an `[x: string]: never` index signature into `KnownKeysOnly`, which
+ * rejected valid configs whose `where` uses the built-in `RAW` predicate
+ * (ISSUES #5). */
 type RebuiltRelational<
   Mode,
   TSchema extends TablesRelationalConfig,
@@ -189,13 +195,22 @@ type RebuiltRelational<
   C0,
   E extends DbError,
   L extends ShapeLedger,
-> = <TConfig extends C0 & Record<string, unknown>>(
+> = <TConfig extends C0>(
   config?: KnownKeysOnly<TConfig, C0>,
 ) => Promise<
   Result<
+    // `BuildQueryResult` (drizzle's own) constrains the full-selection arg to
+    // `true | Record<string, unknown>`. `C0` is an uninferred generic here, so
+    // the compiler can't prove `C0` (or `TConfig extends C0`) satisfies it —
+    // intersect with `Record<string, unknown>` ONLY at the BuildQueryResult
+    // call. This never hits the `KnownKeysOnly` parameter (the bug: putting
+    // the intersection on the TConfig constraint leaked an `[x: string]: never`
+    // index signature into the parameter, which rejected valid configs like
+    // `where: { RAW }`), and it does not change which keys BuildQueryResult
+    // reads, so per-call `columns`/`with` precision is preserved.
     Mode extends "one"
-      ? BuildQueryResult<TSchema, TFields, TConfig> | undefined
-      : BuildQueryResult<TSchema, TFields, TConfig>[],
+      ? BuildQueryResult<TSchema, TFields, TConfig & Record<string, unknown>> | undefined
+      : BuildQueryResult<TSchema, TFields, TConfig & Record<string, unknown>>[],
     RelationalReadE<E, L>
   >
 >;
