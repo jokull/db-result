@@ -2,7 +2,7 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.3.1] — 2026-09-03
 
 ### Fixed
 

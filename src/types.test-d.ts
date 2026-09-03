@@ -54,7 +54,7 @@ import type {
 } from "kysely";
 import { pgTable, text, integer } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { sql as drizzleSql } from "drizzle-orm";
+import { asc, sql as drizzleSql } from "drizzle-orm";
 import type { Result } from "better-result";
 
 // ─── Assertion helpers ───────────────────────────────────────────────────────
@@ -817,10 +817,23 @@ const relPostsT = pgTable("rel_posts", {
     .references(() => relUsersT.id),
   title: text("title").notNull(),
 });
-const relPgRelations = defineRelations({ users: relUsersT, posts: relPostsT }, (r) => ({
-  users: { posts: r.many.posts() },
-  posts: { user: r.one.users({ from: r.posts.userId, to: r.users.id }) },
-}));
+const relCommentsT = pgTable("rel_comments", {
+  id: integer("id").primaryKey(),
+  postId: integer("post_id")
+    .notNull()
+    .references(() => relPostsT.id),
+  body: text("body").notNull(),
+});
+const relPgRelations = defineRelations(
+  { users: relUsersT, posts: relPostsT, comments: relCommentsT },
+  (r) => ({
+    users: { posts: r.many.posts() },
+    posts: {
+      user: r.one.users({ from: r.posts.userId, to: r.users.id }),
+      comments: r.many.comments(),
+    },
+  }),
+);
 const relPgDb = drizzle({ relations: relPgRelations, connection: { connectionString: "x" } });
 const wrappedPg = drizzleTryDb(relPgDb);
 
@@ -841,6 +854,30 @@ type _relRaw0 = Assert<
 // reads keep the constraint tags out of the error union.
 type _relRaw1 = Assert<Absent<Unique, ErrOfPromise<typeof relRaw>> extends true ? true : false>;
 type _relRaw2 = Assert<Member<Data, ErrOfPromise<typeof relRaw>> extends true ? true : false>;
+// Nested projections with a relational orderBy callback must retain both
+// Drizzle's accepted config surface and the exact projected Result value.
+const relNestedOrderBy = wrappedPg.query.users.findFirst({
+  where: { RAW: (user) => drizzleSql`${user.id} LIKE ${"a%"}` },
+  columns: { id: true },
+  with: {
+    posts: {
+      orderBy: (post) => [asc(post.id)],
+      columns: { id: true },
+      with: { comments: { columns: { body: true } } },
+    },
+  },
+});
+type _relNestedOrderBy0 = Assert<
+  Same<
+    OkOfPromise<typeof relNestedOrderBy>,
+    { id: string; posts: { id: number; comments: { body: string }[] }[] } | undefined
+  > extends true
+    ? true
+    : false
+>;
+type _relNestedOrderBy1 = Assert<
+  Absent<Unique, ErrOfPromise<typeof relNestedOrderBy>> extends true ? true : false
+>;
 // a plain-column where still works alongside the RAW form:
 wrappedPg.query.users.findFirst({ where: { id: "abc" }, columns: { id: true } });
 
