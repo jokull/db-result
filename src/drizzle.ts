@@ -87,7 +87,9 @@ type AnyDrizzleDb = {
 type TransactionOf<D> = D extends {
   transaction(cb: (tx: infer TX) => any, ...rest: any[]): any;
 }
-  ? TX & AnyDrizzleDb
+  ? TX extends AnyDrizzleDb
+    ? TX
+    : TX & AnyDrizzleDb
   : never;
 
 /** Drizzle's own branded rejection for sync transactions (`DrizzleTypeError`

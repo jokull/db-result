@@ -2,6 +2,21 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+
+- **`drizzleTryDb` `select(fields)` keeps NOT NULL column types.** `FieldDataOf`
+  tested `TJoinName extends never` on a bare type parameter; distribution over
+  the default `never` turned every non-null projected column into `never`
+  (nullable columns and `select()` were unaffected). Tuple-wrapped check (#6).
+- **`drizzleTryDb` transaction callback client is typed on node-postgres.**
+  `TransactionOf` intersected `PgTransaction` with the `(...args: any[]) => any`
+  db contract, and overload resolution picked the `any` signature for every
+  builder inside `wrapped.transaction(async (tx) => …)`. The intersection is
+  now applied only when the inferred client does not already satisfy the
+  contract (#7).
+
 ## [0.3.1] — 2026-09-03
 
 ### Fixed

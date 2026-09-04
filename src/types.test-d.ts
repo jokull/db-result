@@ -288,6 +288,10 @@ type _w1 = Assert<Absent<Unique, WSelErr> extends true ? true : false>;
 type _w2 = Assert<Member<TxAborted, WSelErr> extends true ? true : false>;
 type WRow = Awaited<ReturnType<typeof wsel.execute>> extends Result<infer V, unknown> ? V : never;
 type _w3 = Assert<WRow extends unknown[] ? true : false>;
+// ISSUES #6: a projected NOT NULL column keeps its data type. `FieldDataOf`
+// tested `TJoinName extends never` on a bare parameter, which distributes to
+// `never` and turned every non-null selected column into `never`.
+type _w3a = Assert<Same<WRow, { id: number; email: string | null }[]> extends true ? true : false>;
 
 // zero-arg select: the mapped chain degrades rows to structurally-typed
 // arrays (documented sharp edge) — the union narrowing still applies.
@@ -370,6 +374,12 @@ type ErrOfResult<R> = R extends Result<unknown, infer E> ? E : never;
 const wtxInner = wrapped.transaction(async (tx) => {
   const r = await tx.insert(users).values({ id: 1, email: "a" }).execute();
   type _w11 = Assert<Member<Unique, ErrOfResult<typeof r>> extends true ? true : false>;
+  // ISSUES #7: the pg transaction client is typed, not `any`. `TransactionOf`
+  // intersected drizzle's tx with the `(...args: any[]) => any` contract, and
+  // the overload resolution picked the `any` signature for every builder.
+  const txRows = await tx.select({ id: users.id }).from(users).for("update");
+  type TxRow = typeof txRows extends Result<infer V, unknown> ? V : never;
+  type _w11a = Assert<Same<TxRow, { id: number }[]> extends true ? true : false>;
   return r;
 });
 void wtxInner;

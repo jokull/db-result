@@ -90,7 +90,7 @@ type FieldDataOf<F, TTable, TJoinName = never, TNullable extends boolean = false
     : unknown
   : F extends { _: { data: infer D; notNull: infer N; tableName: infer TN } }
     ? N extends true
-      ? TJoinName extends never
+      ? [TJoinName] extends [never]
         ? D
         : TN extends TJoinName
           ? TNullable extends true
