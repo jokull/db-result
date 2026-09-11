@@ -5,6 +5,44 @@ Release-blocking ledger for db-result. Severity: **blocks release** /
 
 ---
 
+## 6. `drizzleTryDb` `select(fields)` types every NOT NULL column as `never`
+
+**Status: FIXED** — branch `fix/select-fields-never-and-pg-transaction-client`
+(GitHub #6). Found by the trip monorepo's `apps/web` (drizzle 1.0.0-rc.4,
+node-postgres): `db.select({ id: t.id }).from(t)` resolved to
+`Result<{ id: never }[], …>`; nullable columns and `select()` were fine.
+
+**Root cause:** `FieldDataOf<F, TTable, TJoinName = never, …>` checked
+`TJoinName extends never ? D : …` on a bare type parameter. Conditional types
+distribute over a bare parameter, and distribution over `never` is `never`,
+so every non-null column took the `never` branch instead of `D`.
+
+**Fix:** `[TJoinName] extends [never] ? D : …`. `_w3a` in `types.test-d.ts`
+asserts the projected row type (`{ id: number; email: string | null }[]`);
+the earlier `_w3` only asserted `unknown[]`, which `never[]` satisfies.
+
+---
+
+## 7. `drizzleTryDb` transaction callback client is `any` on node-postgres
+
+**Status: FIXED** — same branch (GitHub #7). Inside
+`wrapped.transaction(async (tx) => …)` every `tx.select`/`tx.insert`/… was
+`any`, so the E-track and the row types vanished; wrapping the raw transaction
+client by hand (`drizzleTryDb(rawTx)`) typed correctly.
+
+**Root cause:** `TransactionOf<D>` intersected drizzle's inferred
+`PgTransaction` with the `AnyDrizzleDb` contract (`TX & AnyDrizzleDb`). The
+contract's members are `(...args: any[]) => any`, so `DrizzleTryDb`'s
+`D["select"] extends { (): infer B0 }` resolved against the intersection's
+`any` overload and every wrapped builder became `any`.
+
+**Fix:** intersect only when the inferred client does not already satisfy the
+contract (`TX extends AnyDrizzleDb ? TX : TX & AnyDrizzleDb`). `_w11a` asserts
+`tx.select({ id: users.id }).from(users).for("update")` inside a wrapped
+transaction resolves to `{ id: number }[]`.
+
+---
+
 ## 1. `drizzleTryDb` write chains lose `.returning()` row precision
 
 **Status: FIXED** — commit `faf7613` (on `main`, folded into the `v0.1.1`

@@ -2,6 +2,21 @@
 
 All notable changes to db-result. This project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+
+- **`drizzleTryDb` `select(fields)` keeps NOT NULL column types.** `FieldDataOf`
+  tested `TJoinName extends never` on a bare type parameter; distribution over
+  the default `never` turned every non-null projected column into `never`
+  (nullable columns and `select()` were unaffected). Tuple-wrapped check (#6).
+- **`drizzleTryDb` transaction callback client is typed on node-postgres.**
+  `TransactionOf` intersected `PgTransaction` with the `(...args: any[]) => any`
+  db contract, and overload resolution picked the `any` signature for every
+  builder inside `wrapped.transaction(async (tx) => …)`. The intersection is
+  now applied only when the inferred client does not already satisfy the
+  contract (#7).
+
 ## [0.3.1] — 2026-09-03
 
 ### Fixed
@@ -11,7 +26,7 @@ All notable changes to db-result. This project adheres to [Semantic Versioning](
   `Record<string, unknown>`, which leaked an `[x: string]: never` index
   signature into the `KnownKeysOnly` parameter and rejected valid configs whose
   `where` used `RAW` (`TS2345: Type '{ RAW: … }' is not assignable to type
-  'never'`). The intersection now stays off the parameter (Drizzle's exact
+'never'`). The intersection now stays off the parameter (Drizzle's exact
   `TConfig extends C0` + `KnownKeysOnly<TConfig, C0>` form) and is applied only
   where `BuildQueryResult` needs it, so per-call `columns` / `with` projection
   precision is unchanged (ISSUES #5).
