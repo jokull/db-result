@@ -4,7 +4,7 @@
  * builder whose chain methods return execute-bearing builders gets its
  * terminal E-tracked to `Result<T, E>` with retry (re-execution) and shape
  * narrowing (per-builder `ShapeUnion`). Each factory (`drizzleTryDb`,
- * `kyselyTryDb`, `prismaTryDb`) curates its own client surface on top.
+ * `kyselyTryDb`) curates its own client surface on top.
  */
 import type { DbError, ShapeLedger, ShapeUnion } from "./db-result.js";
 import type { Result } from "better-result";

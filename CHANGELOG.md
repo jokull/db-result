@@ -26,7 +26,7 @@ All notable changes to db-result. This project adheres to [Semantic Versioning](
   `Record<string, unknown>`, which leaked an `[x: string]: never` index
   signature into the `KnownKeysOnly` parameter and rejected valid configs whose
   `where` used `RAW` (`TS2345: Type '{ RAW: … }' is not assignable to type
-  'never'`). The intersection now stays off the parameter (Drizzle's exact
+'never'`). The intersection now stays off the parameter (Drizzle's exact
   `TConfig extends C0` + `KnownKeysOnly<TConfig, C0>` form) and is applied only
   where `BuildQueryResult` needs it, so per-call `columns` / `with` projection
   precision is unchanged (ISSUES #5).

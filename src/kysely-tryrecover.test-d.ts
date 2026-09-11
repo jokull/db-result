@@ -15,14 +15,14 @@ import { kyselyTryDb } from "./kysely.ts";
 import type { SqliteDbError } from "./drivers/sqlite.ts";
 
 interface DB {
-	post: { slug: string; title: string };
+  post: { slug: string; title: string };
 }
 
 declare class SlugTaken extends Error {
-	declare readonly _tag: "slug-taken";
+  declare readonly _tag: "slug-taken";
 }
 declare class PostNotFound extends Error {
-	declare readonly _tag: "post-not-found";
+  declare readonly _tag: "post-not-found";
 }
 
 import { ForeignKeyViolation, UniqueViolation } from "./tags.ts";
@@ -31,8 +31,7 @@ declare function slugTaken(): SlugTaken;
 declare function notFound(): PostNotFound;
 
 /** Mirrors result-rpc's `err`: public Result, phantom never success lane. */
-const err = <E extends { _tag: string }>(error: E): Result<never, E> =>
-	new Err<never, E>(error);
+const err = <E extends { _tag: string }>(error: E): Result<never, E> => new Err<never, E>(error);
 
 const rawDb = new Kysely<DB>({ dialect: {} as never });
 const db = kyselyTryDb<typeof rawDb, SqliteDbError>(rawDb);
@@ -40,20 +39,19 @@ const db = kyselyTryDb<typeof rawDb, SqliteDbError>(rawDb);
 // The blog's createPost shape: constraint codes fold to domain errors,
 // everything else falls through as a panic.
 const folded = (
-	await db
-		.insertInto("post")
-		.values({ slug: "x", title: "t" })
-		.returningAll()
-		.executeTakeFirstOrThrow()
+  await db
+    .insertInto("post")
+    .values({ slug: "x", title: "t" })
+    .returningAll()
+    .executeTakeFirstOrThrow()
 ).tryRecover((e) => {
-	if (UniqueViolation.is(e)) return err(slugTaken());
-	if (ForeignKeyViolation.is(e)) return err(notFound());
-	throw e;
+  if (UniqueViolation.is(e)) return err(slugTaken());
+  if (ForeignKeyViolation.is(e)) return err(notFound());
+  throw e;
 });
 
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-	? true
-	: false;
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Assert<T extends true> = T;
 
 // The success lane must survive the fold so callers can chain on the row.
@@ -65,6 +63,4 @@ type ErrLane = InferErr<typeof folded>;
 type A2 = Assert<Equal<ErrLane, SlugTaken | PostNotFound>>;
 
 // Genuinely useful chaining must type-check off the fold result.
-const chained: Result<string, SlugTaken | PostNotFound> = folded.andThen((row) =>
-	err(slugTaken()),
-);
+const chained: Result<string, SlugTaken | PostNotFound> = folded.andThen((row) => err(slugTaken()));
