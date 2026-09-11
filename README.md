@@ -284,7 +284,7 @@ docker compose up -d --wait       # + the DSNs (see package.json) →
 bun run test:integration          # the live Docker pass only
 ```
 
-Status: `0.1.0`, MIT. Every release runs the full suite above first.
+Status: `0.3.2`, MIT. Every release runs the full suite above first.
 
 Classification modeled on [Effect SQL](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/unstable/sql/SqlError.ts),
 finer on the constraint family (FK/not-null/check stay separate for the fold),
